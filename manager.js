@@ -80,9 +80,11 @@ const TGManager = (() => {
       assist: !!(await chrome.storage.local.get('assistOn')).assistOn,
       titles: (await chrome.storage.local.get('chTitles')).chTitles || {},
       rules: { ...RULES_DEF, ...((await chrome.storage.local.get('assistRules')).assistRules || {}) },
-      notify: new Set((await chrome.storage.local.get('notifyFolders')).notifyFolders || []),
+      nrules: await TG.notifyRules(),
+      notify: new Set(),
       thumbs: (await chrome.storage.local.get('chThumbs')).chThumbs || {}
     };
+    syncNotifySet();
     host = document.createElement('div');
     host.id = 'tg-manager';
     $ = host.attachShadow({ mode: 'open' });
@@ -170,8 +172,8 @@ const TGManager = (() => {
         <nav class="views"></nav>
         <div class="notifybox">
           <div class="nb-title">新着通知</div>
-          <p class="help">フォルダにマウスを乗せて🔔を押すと、そのフォルダに新着が出たときPCに通知します（15分ごとに確認・YouTubeのタブを開いている間）。</p>
-          <button data-act="checknow">今すぐ新着を確認</button>
+          <p class="help">フォルダにマウスを乗せて🔔で通知のオン／オフ。タイミング（すぐ・夜だけ等）・重要度・キーワード・配信の通知は右上の ⚙ →「🔔 通知」で設定します。</p>
+          <button data-act="checknow">今すぐ新着を確認</button> <button data-act="settab" data-tab="notify">🔔 通知の設定</button>
         </div>
         <p class="help">フォルダを選ぶと、そのフォルダのチャンネルだけを表示します。<br>
           各チャンネルの下のボタンを押すとフォルダに出し入れできます（複数フォルダOK）。<br>
@@ -959,6 +961,10 @@ const TGManager = (() => {
         if (st.pop?.kind === 'settings') return hidePop();
         return openSettings();
       case 'settab': return openSettings(el.dataset.tab);
+      case 'nt-test': {
+        const r = await chrome.runtime.sendMessage({ type: 'tg-notify-test', level: el.dataset.lv });
+        return setProgress(r?.ok ? 'テスト通知を出しました' : 'テスト通知を出せませんでした');
+      }
       case 'cmtset': {
         const { cmt = {} } = await chrome.storage.local.get('cmt');
         await chrome.storage.local.set({ cmt: { ...cmt, [el.dataset.k]: el.dataset.k === 'speed' ? +el.dataset.v : el.dataset.v } });
@@ -996,8 +1002,9 @@ const TGManager = (() => {
         st.rendered = 0;
         renderStats(); return renderList();
       case 'notify': {
-        st.notify.has(f.id) ? st.notify.delete(f.id) : st.notify.add(f.id);
-        await chrome.storage.local.set({ notifyFolders: [...st.notify] });
+        if (st.notify.has(f.id)) st.nrules.folders[f.id] = { ...(st.nrules.folders[f.id] || {}), mode: 'off' };
+        else st.nrules.folders[f.id] = { level: 'normal', ...(st.nrules.folders[f.id] || {}), mode: 'now' };
+        await saveNotify();
         setProgress(st.notify.has(f.id) ? `「${f.name}」の新着を通知します` : `「${f.name}」の通知をオフにしました`);
         return renderAside();
       }
@@ -1239,7 +1246,82 @@ const TGManager = (() => {
   }
 
   // ---------- 設定（右上の ⚙）：バックアップ・同期／振り分け補助／コメント ----------
-  const SET_TABS = [['backup', '☁ バックアップ・同期'], ['assist', '🪄 振り分け補助'], ['cmt', '💬 コメント']];
+  const SET_TABS = [['backup', '☁ バックアップ・同期'], ['notify', '🔔 通知'], ['assist', '🪄 振り分け補助'], ['cmt', '💬 コメント']];
+  // ---------- 通知の設定 ----------
+  function syncNotifySet() {
+    st.notify = new Set(st.folders.filter(f => (st.nrules.folders[f.id]?.mode || 'off') !== 'off').map(f => f.id));
+  }
+  async function saveNotify() {
+    syncNotifySet();
+    await chrome.storage.local.set({ notifyRules: st.nrules, notifyFolders: [...st.notify] });
+  }
+  const MODE_LB = [['inherit', '親に合わせる'], ['off', 'オフ'], ['now', 'すぐ'], ['window', '時間帯だけ'], ['kw', 'キーワードだけ']];
+  const LV_LB = [['high', '高'], ['normal', '中'], ['low', '低']];
+  const opt = (list, v) => list.map(([k, l]) => `<option value="${k}" ${k === v ? 'selected' : ''}>${l}</option>`).join('');
+  function openNotifyCfg() {
+    const R = st.nrules;
+    const rows = TG.tree(st.folders).map(({ f, depth }) => {
+      const own = R.folders[f.id];
+      const mode = own?.mode || (f.parent ? 'inherit' : 'off');
+      const eff = TG.ruleFor(R, st.folders, f.id);
+      const lv = own?.level || 'normal';
+      return `<div class="nt-row" data-nf="${f.id}" style="--d:${depth}">
+        <span class="nt-name"><i style="background:${esc(f.color)}"></i>${esc(f.name)}</span>
+        <select data-nk="mode" title="通知のタイミング">${opt(f.parent ? MODE_LB : MODE_LB.slice(1), mode)}</select>
+        <select data-nk="level" title="重要度" ${mode === 'inherit' || mode === 'off' ? 'disabled' : ''}>${opt(LV_LB, lv)}</select>
+        <span class="nt-win" ${mode === 'window' ? '' : 'hidden'}><input type="time" data-nk="from" value="${esc(own?.from || '19:00')}">〜<input type="time" data-nk="to" value="${esc(own?.to || '23:00')}"></span>
+        ${mode === 'inherit' ? `<span class="nt-eff">→ ${esc(MODE_LB.find(x => x[0] === eff.mode)?.[1] || 'オフ')}</span>` : ''}
+      </div>`;
+    }).join('');
+    showPop(setAnchor(), settingsShell('notify', `<div class="bk nt">
+      <div class="bk-h">🔔 通知</div>
+      <details class="acc" ${st.ntHelp ? 'open' : ''} data-acc="ntHelp"><summary>通知する動画の選び方（おすすめ）</summary>
+        <ul class="nt-help">
+          <li><b>すぐ見たいフォルダだけ「すぐ」</b>（ニュース・推しの配信者など）。重要度「高」は閉じるまで残ります。</li>
+          <li><b>まとめて見るフォルダは「時間帯だけ」</b>（エンタメ・ゲーム等を 19:00〜23:00 など）。時間外の新着は時間帯の始めにまとめて届きます。</li>
+          <li><b>数が多いフォルダは「キーワードだけ」</b>にして、下の例外キーワード（LIVE・生配信・速報など）を含む動画だけ知らせると、通知が増えすぎません。</li>
+          <li><b>登録チャンネルの配信</b>はフォルダと別に「配信」でオン（見逃したくない人向け）。</li>
+          <li>それ以外のフォルダは「オフ」のままでOK。新着はサイドバーの「新着動画」でまとめて見られます。</li>
+        </ul></details>
+      <div class="bk-sub">知らせ方</div>
+      <div class="ar-row"><span>表示</span><select data-ng="show">${opt([['both', 'PCの通知＋YouTube画面の右下'], ['pc', 'PCの通知（Windowsの右下）'], ['page', 'YouTube画面の右下からスライド']], R.show)}</select></div>
+      <div class="ar-row"><span>新着の確認の間隔<em>YouTubeのタブを開いている間</em></span><select data-ng="interval">${opt([['5', '5分'], ['10', '10分'], ['15', '15分'], ['30', '30分']], String(R.interval))}</select></div>
+      <div class="bk-sub">フォルダごと</div>
+      <div class="nt-rows">${rows || '<p class="bk-note">フォルダがありません</p>'}</div>
+      <div class="bk-sub">例外キーワード</div>
+      <p class="bk-note">タイトルにこの言葉を含む動画は、フォルダが「時間帯だけ」「キーワードだけ」でも<b>すぐ</b>知らせます（カンマ区切り）。</p>
+      <div class="ar-row"><input class="nt-kw" data-ng="kw" value="${esc(R.kw)}" placeholder="LIVE, 生配信, 速報"></div>
+      <div class="ar-row"><span>キーワードの重要度</span><select data-ng="kwLevel">${opt(LV_LB, R.kwLevel)}</select></div>
+      <label class="bk-check"><input type="checkbox" data-ng="kwAll" ${R.kwAll ? 'checked' : ''}><span>通知オフのフォルダ・未分類の登録チャンネルにも使う</span></label>
+      <div class="bk-sub">登録チャンネルの配信</div>
+      <label class="bk-check"><input type="checkbox" data-nl="on" ${R.live.on ? 'checked' : ''}><span>配信が始まったら知らせる</span></label>
+      <div class="ar-row"><span>対象</span><select data-nl="scope">${opt([['all', 'すべての登録チャンネル'], ['notify', '通知オンのフォルダのチャンネルだけ']], R.live.scope)}</select></div>
+      <label class="bk-check"><input type="checkbox" data-nl="upcoming" ${R.live.upcoming ? 'checked' : ''}><span>配信予定（待機所）ができたときも知らせる</span></label>
+      <div class="ar-row"><span>配信の重要度</span><select data-nl="level">${opt(LV_LB, R.live.level)}</select></div>
+      <div class="bk-row"><button data-act="nt-test" data-lv="normal">テスト通知（中）</button><button data-act="nt-test" data-lv="high">テスト通知（高）</button><button data-act="checknow">今すぐ新着を確認</button></div>
+      <p class="bk-note">新着の確認は YouTube のタブを開いている間に行います。「時間帯だけ」の通知は、時間になるとバックグラウンドから届きます。</p>
+    </div>`), SET_OPTS);
+    const p = q('.pop');
+    p.querySelectorAll('.acc[data-acc]').forEach(d => d.addEventListener('toggle', () => { st[d.dataset.acc] = d.open; }));
+    p.querySelectorAll('[data-nk]').forEach(inp => inp.addEventListener('change', async () => {
+      const id = inp.closest('[data-nf]').dataset.nf;
+      const k = inp.dataset.nk;
+      if (k === 'mode' && inp.value === 'inherit') delete R.folders[id];
+      else R.folders[id] = { level: 'normal', from: '19:00', to: '23:00', ...(R.folders[id] || {}), [k]: inp.value };
+      await saveNotify();
+      if (k === 'mode') { openNotifyCfg(); renderAside(); }
+    }));
+    p.querySelectorAll('[data-ng]').forEach(inp => inp.addEventListener('change', async () => {
+      const k = inp.dataset.ng;
+      R[k] = inp.type === 'checkbox' ? inp.checked : k === 'interval' ? +inp.value : inp.value;
+      await saveNotify();
+    }));
+    p.querySelectorAll('[data-nl]').forEach(inp => inp.addEventListener('change', async () => {
+      R.live = { ...R.live, [inp.dataset.nl]: inp.type === 'checkbox' ? inp.checked : inp.value };
+      await saveNotify();
+    }));
+    ['keydown', 'keyup', 'keypress'].forEach(t => p.addEventListener(t, e => e.stopPropagation()));
+  }
   const setAnchor = () => q('.setbtn');
   function settingsShell(tab, inner) {
     st.setTab = tab;
@@ -1250,6 +1332,7 @@ const TGManager = (() => {
   function openSettings(tab = st.setTab || 'backup') {
     if (tab === 'assist') return openAssistCfg();
     if (tab === 'cmt') return openCommentCfg();
+    if (tab === 'notify') return openNotifyCfg();
     return openBackup();
   }
   async function openCommentCfg() {
@@ -1624,6 +1707,18 @@ const TGManager = (() => {
   .bk-item small{color:var(--muted)}
   .bk-item button{padding:4px 10px;font-size:12px;flex:none}
   .pop.wide{max-height:80vh;overflow-y:auto}
+  .nt-rows{display:flex;flex-direction:column;gap:4px;margin:6px 0 4px}
+  .nt-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:3px 0 3px calc(var(--d) * 14px)}
+  .nt-name{flex:1;min-width:100px;display:flex;align-items:center;gap:6px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .nt-name i{width:9px;height:9px;border-radius:3px;flex:none}
+  .nt select,.nt input{padding:4px 6px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit;font-size:12px}
+  .nt select:disabled{opacity:.4}
+  .nt-win{display:inline-flex;align-items:center;gap:3px}
+  .nt-win[hidden]{display:none}
+  .nt-eff{color:var(--muted);font-size:11px}
+  .ar-row input.nt-kw{flex:1;width:100%;text-align:left}
+  .nt-help{margin:0 0 8px;padding-left:18px;font-size:12px;line-height:1.7;color:var(--muted)}
+  .nt-help b{color:var(--fg)}
   .pop.settings{width:min(520px,calc(100vw - 24px));max-width:none;padding:0;max-height:min(84vh,860px);overflow-y:auto}
   .set-tabs{position:sticky;top:0;z-index:2;display:flex;gap:2px;padding:10px 10px 0;background:var(--card);border-bottom:1px solid var(--line)}
   .set-tab{border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;background:transparent;padding:8px 14px;font-size:13px;color:var(--muted);margin-bottom:-1px}

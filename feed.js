@@ -3,6 +3,7 @@
 // （RSSが使えれば予備として使う）
 const TGFeed = (() => {
   const TYPES = {
+    new: { label: '新着動画', short: '新着', pl: '' },
     video: { label: '動画', pl: 'UULF' },
     live: { label: 'ライブ・配信', pl: 'UULV' },
     short: { label: 'ショート', pl: 'UUSH' },
@@ -57,7 +58,7 @@ const TGFeed = (() => {
     try {
       const r = await fetch(`/oembed?url=${encodeURIComponent('https://www.youtube.com/shorts/' + v)}&format=json`, { credentials: 'omit', signal });
       const j = r.ok ? await r.json() : null;
-      if (j?.author_url) o = { k: TG.channelKey(j.author_url), n: j.author_name || '' };
+      if (j?.author_url) o = { k: TG.channelKey(j.author_url), n: j.author_name || '', t: j.title || '' };
     } catch (e) { if (signal?.aborted) throw e; }
     if (!o) o = await YTAPI.videoOwner(v).catch(() => null);
     owners.set(v, o);
@@ -65,7 +66,7 @@ const TGFeed = (() => {
   }
   // 動画・ライブ・ショートは30チャンネルずつ取得し、表示も30件ずつ
   const BATCH = 30, PAGE = 30;
-  const BATCHED = t => t !== 'rec' && t !== 'later';
+  const BATCHED = t => t !== 'rec' && t !== 'later' && t !== 'new';
   let batch = { chs: [], loaded: 0, loading: false };
   const CACHE = 'feedCache4';
   const TTL = 10 * 60e3;
@@ -144,6 +145,7 @@ const TGFeed = (() => {
 
   function signature(S) {
     if (S.feedType === 'later') return 'later:' + Date.now(); // 毎回作り直す
+    if (S.feedType === 'new') return JSON.stringify(['new', S.newOff, S.folders.map(f => [f.id, f.keys.length, f.parent]), Object.values(S.channels).filter(c => c.hidden).length]);
     if (S.feedType === 'rec') return JSON.stringify(['rec', favSetOf(S).size, S.folders.map(f => [f.name, f.color, f.keys.length])]);
     return JSON.stringify([S.activeGroup, S.feedType, targets(S).map(c => c.key), S.folders.map(f => [f.name, f.color])]);
   }
@@ -205,7 +207,8 @@ const TGFeed = (() => {
 
   function card(it) {
     const short = curType === 'short' || (curType === 'rec' && it.short);
-    const url = short ? `/shorts/${it.v}` : `/watch?v=${it.v}`;
+    const shortUrl = short || (curType === 'later' && it.short);
+    const url = shortUrl ? `/shorts/${it.v}` : `/watch?v=${it.v}${it.list ? '&list=' + encodeURIComponent(it.list) : ''}`;
     const hq = `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/hqdefault.jpg`;
     const src = /^https:\/\/i\d?\.ytimg\.com\//.test(it.th || '') ? it.th : short ? `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/oardefault.jpg` : hq;
     const now = Date.now();
@@ -233,7 +236,7 @@ const TGFeed = (() => {
   function more() {
     if (!el) return;
     if (shown >= items.length) {
-      if (curType === 'rec' && rec.token && !rec.loading) loadRec(run, false);
+      if (curType === 'rec' && recHasMore() && !rec.loading) loadRec(run, false);
       if (BATCHED(curType) && batch.loaded < batch.chs.length && !batch.loading) loadBatch(run, false);
       return;
     }
@@ -266,6 +269,42 @@ const TGFeed = (() => {
     }
   }
 
+  // ---------- 新着動画：登録チャンネルの直近3日（15分ごとに取得している recent）をカテゴリで絞って表示 ----------
+  function newFilter(S) {
+    const off = new Set(S.newOff || []);
+    const fmap = TG.folderMap(S.channels, S.folders);
+    const hidden = new Set();
+    for (const c of Object.values(S.channels)) if (c.hidden) { hidden.add(c.key); if (c.id) hidden.add('channel/' + c.id); }
+    return x => {
+      if (hidden.has(x.k) || (x.id && hidden.has('channel/' + x.id))) return false;
+      const fs = fmap.get(x.k) || (x.id && fmap.get('channel/' + x.id)) || [];
+      if (!fs.length) return !off.has('__unsorted');
+      return fs.some(f => !off.has(TG.rootOf(S.folders, f.id)?.id || f.id));
+    };
+  }
+  async function paintNew(S, my, force) {
+    let { recent = [], lastCheckAt = 0 } = await chrome.storage.local.get(['recent', 'lastCheckAt']);
+    const draw = msg => {
+      if (my !== run) return;
+      const keep = newFilter(S);
+      const list = recent.filter(keep).sort((a, b) => (b.p || 0) - (a.p || 0)).map(x => ({
+        v: x.v, t: x.t, p: x.p, n: 0, live: x.live, up: x.up, w: x.w || 0, ch: { key: x.k || (x.id ? 'channel/' + x.id : ''), name: x.n, unsub: false }
+      }));
+      paint(list, msg ?? `直近3日の新着 ${list.length} 本${recent.length !== list.length ? `（全 ${recent.length} 本中・カテゴリで絞り込み）` : ''}・${lastCheckAt ? TG.rel(lastCheckAt) + 'に確認' : ''}`);
+      if (!list.length) el.querySelector('.tg-grid').innerHTML = `<div class="tg-empty">${recent.length ? '選んだカテゴリの新着はありません。上のカテゴリをオンにしてください。' : '新着を確認しています…'}</div>`;
+    };
+    draw();
+    if (!force && Date.now() - lastCheckAt < 5 * 60e3 && recent.length) return;
+    status('新着を確認中…');
+    try {
+      await TGX.check({ force: true });
+      ({ recent = [], lastCheckAt = 0 } = await chrome.storage.local.get(['recent', 'lastCheckAt']));
+      draw();
+    } catch (e) {
+      if (my === run) status('新着を確認できませんでした：' + e.message);
+    }
+  }
+
   // ---------- 後で見る：上＝🕒で追加したもの／下＝YouTube本体の「後で見る」（YouTubeと同期） ----------
   let wl = { at: 0, items: null, error: '' };
   async function paintLater(S, my, force) {
@@ -275,9 +314,14 @@ const TGFeed = (() => {
     // 以前「取り込む」で入れたものは下の段（YouTube側）で表示するので、上の一覧からは外す
     if (later.some(x => x.wl)) { later = later.filter(x => !x.wl); await chrome.storage.local.set({ later }); }
     const top = later.map(x => ({ ...x, ch: { ...x.ch, unsub: unsub(x.ch.key) } }));
+    let { wlSort = 'yt' } = await chrome.storage.local.get('wlSort');
     const draw = () => {
       if (my !== run) return;
-      const bottom = (wl.items || []).map(x => ({ ...x, wlSrc: true }));
+      let bottom = (wl.items || []).map((x, i) => ({ ...x, wlSrc: true, _i: i }));
+      // 並び：YouTubeの並び／投稿が新しい順／投稿が古い順（投稿日が分からないものは最後）
+      if (wlSort === 'new') bottom.sort((a, b) => (b.p || 0) - (a.p || 0) || a._i - b._i);
+      if (wlSort === 'old') bottom.sort((a, b) => (a.p || Infinity) - (b.p || Infinity) || a._i - b._i);
+      const sortSel = `<select class="tg-wlsort" title="並び順">${[['yt', 'YouTubeの並び'], ['new', '投稿が新しい順'], ['old', '投稿が古い順']].map(([k, l]) => `<option value="${k}" ${k === wlSort ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
       items = top.concat(bottom);
       shown = items.length;
       el.classList.remove('tg-loading');
@@ -287,10 +331,15 @@ const TGFeed = (() => {
       g.innerHTML = `<div class="tg-sec"><div class="tg-sec-h">🕒 TubeGroupsの後で見る<small>${top.length} 本・追加した順</small></div>
           ${top.length ? `<div class="tg-grid-in">${top.map(it => card(it)).join('')}</div>`
             : '<div class="tg-empty tg-empty-s">まだありません。ホームや再生画面の動画のチャンネル名の下の 🕒、一覧のサムネイルにマウスを乗せると出る 🕒 で追加できます。</div>'}</div>
-        <div class="tg-sec"><div class="tg-sec-h">▶ YouTubeの「後で見る」<small>${wl.items ? `${bottom.length} 本・YouTubeと同じ内容（✕で YouTube からも削除）` : ''}</small></div>
+        <div class="tg-sec"><div class="tg-sec-h">▶ YouTubeの「後で見る」<small>${wl.items ? `${bottom.length} 本・YouTubeと同じ内容（✕で YouTube からも削除）` : ''}</small>${wl.items?.length ? sortSel : ''}</div>
           ${!wl.items ? `<div class="tg-empty tg-empty-s">${wl.error ? '読み込めませんでした：' + esc(wl.error) : 'YouTubeの「後で見る」を読み込み中…'}</div>`
             : bottom.length ? `<div class="tg-grid-in">${bottom.map(it => card(it)).join('')}</div>`
             : '<div class="tg-empty tg-empty-s">YouTubeの「後で見る」は空です。</div>'}</div>`;
+      g.querySelector('.tg-wlsort')?.addEventListener('change', e => {
+        wlSort = e.target.value;
+        chrome.storage.local.set({ wlSort });
+        draw();
+      });
       fillIfHidden();
     };
     const stale = force || !wl.items || Date.now() - wl.at > 5 * 60e3;
@@ -339,40 +388,65 @@ const TGFeed = (() => {
     return s;
   }
 
+  // まだ続きがあるか（動画＝ホームの続き、ショート＝ホームの棚→ショートの連続再生の流れ）
+  const recHasMore = () => (rec.kind === 'short' ? rec.mode !== 'end' : !!rec.token);
   async function loadRec(my, first) {
     rec.loading = true;
-    let added = 0, pages = 0;
+    let added = 0, tries = 0;
     const isShort = rec.kind === 'short';
     try {
-      if (!first) status('おすすめを読み込み中…');
-      while (pages++ < (isShort ? 10 : 6) && added < 30) {
-        const { items: list, token } = await YTAPI.recommended(first && pages === 1 ? null : rec.token, ctl.signal);
-        if (my !== run) return;
-        rec.token = token;
+      if (!first) status(isShort ? 'おすすめのショートを読み込み中…（投稿者を確認しています）' : 'おすすめを読み込み中…');
+      while (tries++ < (isShort ? 8 : 6) && added < (isShort ? 24 : 30)) {
         const seen = new Set(rec.items.map(x => x.v));
         if (isShort) {
-          // ホームのショート棚から。投稿者を調べて未登録のものだけ
-          const cand = list.filter(x => x.short && x.v && !seen.has(x.v));
+          let cand = [];
+          if ((rec.mode || 'home') === 'home') {
+            // まずホームのショート棚から（最初の3ページまで）
+            const { items: list, token } = await YTAPI.recommended(first && tries === 1 ? null : rec.token, ctl.signal);
+            if (my !== run) return;
+            rec.token = token;
+            rec.homePages = (rec.homePages || 0) + 1;
+            cand = list.filter(x => x.short && x.v && !seen.has(x.v));
+            if (!token || rec.homePages >= 3) rec.mode = 'seq';
+            rec.mode = rec.mode || 'home';
+          } else {
+            // その先は、ショートの連続再生と同じ流れ（YouTubeのおすすめショート）から
+            const seed = rec.seed || rec.items[rec.items.length - 1]?.v || rec.lastSeen;
+            if (!seed) { rec.mode = 'end'; break; }
+            let r;
+            try { r = await YTAPI.shortsSequence(seed, rec.seqTok, ctl.signal); }
+            catch (e) { if (ctl.signal.aborted) throw e; rec.mode = 'end'; TG.log('おすすめ', 'ショートの続きを取得できません：' + e.message, 'warn'); break; }
+            if (my !== run) return;
+            rec.seed = seed;
+            rec.seqTok = r.token;
+            cand = r.ids.filter(v => !seen.has(v)).map(v => ({ v, short: true }));
+            if (!r.token || !r.ids.length) rec.mode = 'end';
+          }
+          if (cand.length) rec.lastSeen = cand[cand.length - 1].v;
+          // 投稿者（と題名）を調べて、未登録チャンネルのものだけ
           const queue = [...cand];
           await Promise.all(Array.from({ length: 6 }, async () => {
             while (queue.length) {
               const x = queue.shift();
               const o = await ownerOf(x.v, ctl.signal);
-              if (o) { x.chKey = o.k; x.chName = o.n; }
+              if (o) { x.chKey = o.k; x.chName = o.n; if (!x.t) x.t = o.t || ''; }
             }
           }));
           if (my !== run) return;
           for (const x of cand) {
             if (!x.chKey || seen.has(x.v)) continue;
-            if (rec.fav.has(x.chKey) || rec.fav.has(x.chKey.replace(/^channel\//, 'channel/'))) continue;
+            if (rec.fav.has(x.chKey)) continue;
             seen.add(x.v);
-            rec.items.push({ v: x.v, t: x.t, p: null, n: x.n, th: x.thumb, short: true, w: x.w || 0, ch: { key: x.chKey, name: x.chName, unsub: true } });
+            rec.items.push({ v: x.v, t: x.t || '', p: null, n: x.n || 0, th: x.thumb || '', short: true, w: x.w || 0, ch: { key: x.chKey, name: x.chName, unsub: true } });
             added++;
           }
           if (first) status(`おすすめのショートを読み込み中… ${rec.items.length} 件`);
-          if (!rec.token) break;
+          if (rec.mode === 'end') break;
           continue;
         }
+        const { items: list, token } = await YTAPI.recommended(first && tries === 1 ? null : rec.token, ctl.signal);
+        if (my !== run) return;
+        rec.token = token;
         for (const x of list) {
           if (!x.chKey || x.p === undefined || seen.has(x.v)) continue;
           if (rec.fav.has(x.chKey) || (x.chId && rec.fav.has('channel/' + x.chId))) continue; // 登録済みは除外
@@ -380,7 +454,6 @@ const TGFeed = (() => {
           rec.items.push({ v: x.v, t: x.t, p: x.p, n: x.n, th: x.thumb, live: x.live, up: x.upcoming, w: x.w || 0, ch: { key: x.chKey, name: x.chName, unsub: true } });
           added++;
         }
-        if (!token) break;
         if (first) status(`おすすめを読み込み中… ${rec.items.length} 件`);
         if (!rec.token) break;
       }
@@ -392,11 +465,11 @@ const TGFeed = (() => {
     }
     if (my !== run) return;
     if (first) paint(rec.items, '');
-    else { items = rec.items; status(''); more(); }
+    else { items = rec.items; status(recHasMore() ? '' : 'これ以上のおすすめは見つかりませんでした（「更新」で読み直せます）'); more(); }
     // まだ下端が見えていれば続けて読み込む
     requestAnimationFrame(() => {
       const r = el.querySelector('.tg-more')?.getBoundingClientRect();
-      if (r && r.top < innerHeight + 800 && rec.token && my === run) more();
+      if (r && r.top < innerHeight + 800 && recHasMore() && my === run) more();
     });
     if (first && !rec.items.length) {
       el.querySelector('.tg-grid').innerHTML = `<div class="tg-empty">未登録チャンネルのおすすめ${isShort ? 'ショート' : ''}が見つかりませんでした。<br>しばらくしてから開き直してください。</div>`;
@@ -478,6 +551,7 @@ const TGFeed = (() => {
     folderMap = TG.folderMap(S.channels, S.folders);
 
     if (curType === 'later') return paintLater(S, my, force);
+    if (curType === 'new') return paintNew(S, my, force);
     if (curType === 'rec') {
       const kind = S.recKind === 'short' ? 'short' : 'video';
       rec = recs[kind];

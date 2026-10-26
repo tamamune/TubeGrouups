@@ -7,6 +7,7 @@
   const isSubsFeed = () => location.pathname === '/feed/subscriptions';
   const isChannelPage = () => /^\/(@[^/]+|channel\/|c\/|user\/)/.test(location.pathname);
   const isWatchPage = () => location.pathname === '/watch';
+  const isShortsPage = () => /^\/shorts\/[\w-]{11}/.test(location.pathname);
 
   const P = d => `<svg viewBox="0 0 24 24"><path d="${d}"/></svg>`;
   const IC = {
@@ -17,6 +18,7 @@
     gear: P('M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z'),
     caret: P('M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z'),
     stats: P('M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z'),
+    new: P('M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM8.5 15H7.3l-2.55-3.5V15H3.5V9h1.25l2.5 3.5V9H8.5v6zm5-4.74H11v1.12h2.5v1.26H11v1.11h2.5V15h-4V9h4v1.26zm7 3.74c0 .55-.45 1-1 1h-4c-.55 0-1-.45-1-1V9h1.25v4.51h1.13V9.99h1.25v3.51h1.12V9h1.25v5z'),
     later: P('M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.2 3.2.8-1.3-4.5-2.7V7z'),
     rec: P('M12 10.9c-.61 0-1.1.49-1.1 1.1s.49 1.1 1.1 1.1c.61 0 1.1-.49 1.1-1.1s-.49-1.1-1.1-1.1zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm2.19 12.19L6 18l3.81-8.19L18 6l-3.81 8.19z'),
     grid: P('M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5zm8-2h8v8h-8v-8zm2 2v4h4v-4h-4z')
@@ -92,7 +94,7 @@
       `<a class="tg-g-item ${on ? 'tg-on' : ''}" ${attrs} style="padding-left:${pad}px">${icon}<span class="tg-g-name">${esc(name)}</span>${extra}</a>`;
 
     let h = '<div class="tg-g-block">';
-    for (const [t, def] of Object.entries(TGFeed.TYPES)) h += item(`data-type="${t}"`, IC[t], def.label, onSubs && S.feedType === t, t === 'later' && laterN ? `<span class="tg-g-num">${laterN}</span>` : '');
+    for (const [t, def] of Object.entries(TGFeed.TYPES)) h += item(`data-type="${t}"`, IC[t], def.label, onSubs && S.feedType === t, t === 'later' && laterN ? `<span class="tg-g-num">${laterN}</span>` : t === 'new' ? badge(NC.get('__all')) : '');
     h += item('data-act="stats"', IC.stats, '視聴記録', false);
     h += '</div><div class="tg-g-block"><div class="tg-g-title">フォルダ</div>';
     for (const { f, depth, hidden } of TG.tree(S.folders)) {
@@ -130,7 +132,7 @@
       S.feedType = a.dataset.type;
       await chrome.storage.local.set({ feedType: S.feedType });
     } else if (a.dataset.f) {
-      const wasRec = S.feedType === 'rec' || S.feedType === 'later';
+      const wasRec = S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new';
       if (wasRec) { S.feedType = 'video'; await chrome.storage.local.set({ feedType: 'video' }); } // おすすめ画面ではフォルダが効かないので動画に戻す
       S.activeGroup = isSubsFeed() && !wasRec && S.activeGroup === a.dataset.f ? null : a.dataset.f;
       await TG.setActive(S.activeGroup);
@@ -174,7 +176,8 @@
 
     buildBar(bar);
     layoutBar();
-    if (S.feedType !== 'rec' && S.feedType !== 'later') TGX.markSeen(S, S.activeGroup);
+    if (S.feedType === 'new') TGX.markSeen(S, null);
+    else if (S.feedType !== 'rec' && S.feedType !== 'later') TGX.markSeen(S, S.activeGroup);
     const sig = TGFeed.signature(S);
     if (sig !== feedSig || !feed.dataset.painted) {
       feedSig = sig;
@@ -246,7 +249,7 @@
     const seg = (attr, val, label, on) => `<button class="tg-seg-btn ${on ? 'tg-active' : ''}" ${attr}="${val}">${label}</button>`;
     const types = Object.entries(TGFeed.TYPES).map(([t, d]) => seg('data-type', t, d.short || d.label, S.feedType === t)).join('');
     const cols = [3, 4, 5, 6, 7].map(n => seg('data-cols', n, n, S.cols === n)).join('');
-    const play = S.feedType === 'video' || S.feedType === 'live' || S.feedType === 'later'
+    const play = S.feedType === 'video' || S.feedType === 'live' || S.feedType === 'later' || S.feedType === 'new'
       ? '<button class="tg-chip tg-play" data-play="1" title="表示中の未視聴の動画を、新しい順に続けて再生">▶ 連続再生</button>' : '';
     const hidew = `<button class="tg-chip tg-ghost ${S.hideWatched ? 'tg-active' : ''}" data-hidew="1" title="90%以上見た動画を一覧から隠す">${S.hideWatched ? '視聴済みを表示' : '視聴済みを隠す'}</button>`;
     const tools = `<div class="tg-seg">${types}</div><div class="tg-seg" title="列の数"><span class="tg-seg-lb">列</span>${cols}</div>`;
@@ -280,6 +283,14 @@
         <div class="tg-seg" title="おすすめの種類">${seg('data-reckind', 'video', '動画', S.recKind !== 'short')}${seg('data-reckind', 'short', 'ショート', S.recKind === 'short')}</div>
         <button class="tg-chip tg-ghost" data-reload="1">更新</button></div>`;
       cur = null; curName = 'おすすめ'; totalNew = 0;
+    } else if (S.feedType === 'new') {
+      const off = new Set(S.newOff);
+      const cat = (id, name, color, n) => `<button class="tg-chip tg-cat ${off.has(id) ? '' : 'tg-active'}" data-ncat="${esc(id)}" title="${off.has(id) ? '押すと表示' : '押すと隠す'}">${color ? `<i class="tg-cdot" style="background:${esc(color)}"></i>` : ''}<span class="tg-clabel">${esc(name)}</span>${badge(n)}</button>`;
+      row2 = `<div class="tg-chips tg-folders"><span class="tg-bar-title">${IC.new}新着動画<small>カテゴリを押してオン／オフ</small></span>
+        <button class="tg-chip tg-ghost" data-ncatall="1">${off.size ? 'すべてオン' : 'すべてオフ'}</button>
+        ${tops.map(f => cat(f.id, f.name, f.color, NC.get(f.id))).join('')}${cat('__unsorted', '未分類', '', NC.get('__unsorted'))}
+        <button class="tg-chip tg-ghost" data-reload="1" title="今すぐ新着を確認">更新</button></div>`;
+      cur = null; curName = '新着動画'; totalNew = NC.get('__all');
     } else if (S.feedType === 'later') {
       row2 = `<div class="tg-chips tg-folders"><span class="tg-bar-title">${IC.later}後で見る<small>上：🕒で追加した動画／下：YouTubeの「後で見る」</small></span>
         <button class="tg-chip tg-ghost" data-reload="1" title="YouTubeの「後で見る」を読み込み直す">更新</button></div>`;
@@ -298,8 +309,8 @@
   // 連続再生：表示中の未視聴＋（フォルダ表示なら）そのフォルダの直近の新着、新しい順
   async function playNow(btn) {
     let list = TGFeed.playable();
-    let title = '後で見る';
-    if (S.feedType !== 'later') {
+    let title = S.feedType === 'new' ? '新着動画' : '後で見る';
+    if (S.feedType !== 'later' && S.feedType !== 'new') {
       const f = S.folders.find(x => x.id === S.activeGroup);
       title = f ? TG.pathName(S.folders, f) : S.activeGroup === '__unsorted' ? '未分類' : 'すべて';
       if (S.feedType === 'video') {
@@ -330,6 +341,17 @@
     if (b.dataset.manage) return TGManager.open();
     if (b.dataset.fold) { manualUntil = performance.now() + 700; setFolded(!folded); return; }
     if (b.dataset.reload) return TGFeed.refresh(S, { force: true });
+    if (b.dataset.ncat || b.dataset.ncatall) {
+      const tops = S.folders.filter(f => !f.parent || !S.folders.some(x => x.id === f.parent)).map(f => f.id).concat('__unsorted');
+      let off = new Set(S.newOff);
+      if (b.dataset.ncatall) off = off.size ? new Set() : new Set(tops);
+      else off.has(b.dataset.ncat) ? off.delete(b.dataset.ncat) : off.add(b.dataset.ncat);
+      S.newOff = [...off];
+      await chrome.storage.local.set({ newOff: S.newOff });
+      buildBar(document.getElementById('tg-bar'));
+      layoutBar();
+      return TGFeed.refresh(S);
+    }
     if (b.dataset.reckind) {
       if (S.recKind === b.dataset.reckind) return;
       S.recKind = b.dataset.reckind;
@@ -356,7 +378,7 @@
       await chrome.storage.local.set({ cols: S.cols });
       return;
     } else if ('g' in b.dataset) {
-      if (S.feedType === 'rec' || S.feedType === 'later') { S.feedType = 'video'; await chrome.storage.local.set({ feedType: 'video' }); }
+      if (S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new') { S.feedType = 'video'; await chrome.storage.local.set({ feedType: 'video' }); }
       S.activeGroup = b.dataset.g || null;
       await TG.setActive(S.activeGroup);
     }
@@ -490,14 +512,16 @@
   function paintLaterBtn(b) {
     const on = laterSet.has(b.dataset.v);
     b.classList.toggle('on', on);
-    const label = b.id === 'tg-lfab' ? (on ? '✓ 後で見る' : '🕒 後で見る') : (on ? '✓ 後で見る' : '🕒');
+    const label = b.id === 'tg-lfab' ? (on ? '✓ 後で見る' : '🕒 後で見る') : b.classList.contains('tg-lov') ? (on ? '✓' : '🕒') : (on ? '✓ 後で見る' : '🕒');
     if (b.textContent !== label) b.textContent = label;
     b.title = on ? 'TubeGroupsの「後で見る」から外す' : 'TubeGroupsの「後で見る」に追加（サイドバーの「後で見る」で一覧）';
   }
-  function laterBtn(v) {
+  function laterBtn(v, list = '', short = false) {
     const b = document.createElement('button');
     b.className = 'tg-lbtn';
     b.dataset.v = v;
+    if (list) b.dataset.list = list;
+    if (short) b.dataset.short = '1';
     paintLaterBtn(b);
     return b;
   }
@@ -505,13 +529,16 @@
   function laterInfo(btn) {
     const v = btn.dataset.v;
     const th = `https://i.ytimg.com/vi/${v}/mqdefault.jpg`;
+    const extra = { ...(btn.dataset.list ? { list: btn.dataset.list } : {}), ...(btn.dataset.short ? { short: true } : {}) };
     if (btn.id === 'tg-lfab') {
       const ch = currentChannel();
-      const t = txt(document.querySelector('ytd-watch-metadata h1, #title h1')) || document.title.replace(/ - YouTube$/, '');
-      return { v, t, th, ch: { key: ch?.key || '', name: ch?.name || '', unsub: !(ch && favSet.has(ch.key)) } };
+      const t = isShortsPage()
+        ? txt(document.querySelector('ytd-reel-video-renderer[is-active] h2, ytd-reel-video-renderer[is-active] [class*="title" i], yt-shorts-video-title-view-model')) || document.title.replace(/ - YouTube$/, '')
+        : txt(document.querySelector('ytd-watch-metadata h1, #title h1')) || document.title.replace(/ - YouTube$/, '');
+      return { v, t, th, ...extra, ch: { key: ch?.key || '', name: ch?.name || '', unsub: !(ch && favSet.has(ch.key)) } };
     }
     const item = btn.closest(ITEM_SEL);
-    const tEl = item?.querySelector('#video-title, a#video-title-link, h3 a, h3, [class*="title" i] a[href*="watch"], [class*="title" i] span');
+    const tEl = item?.querySelector('#video-title, a#video-title-link, h3 a, h3, [class*="title" i] a[href*="watch"], [class*="title" i] a[href*="shorts"], [class*="title" i] span');
     const t = txt(tEl) || tEl?.getAttribute('title') || '';
     const link = item?.querySelector(CH_LINK_SEL);
     let key = link ? TG.channelKey(link.getAttribute('href')) : null;
@@ -520,7 +547,7 @@
     if (!key && vidOwner.has(v)) key = ownerKey(vidOwner.get(v));
     if (key === '__other') key = '';
     const name = (key && S.channels[key]?.name) || nm || txt(link) || vidOwner.get(v)?.n || '';
-    return { v, t, th, ch: { key: key || '', name, unsub: !(key && favSet.has(key)) } };
+    return { v, t, th, ...extra, ch: { key: key || '', name, unsub: !(key && favSet.has(key)) } };
   }
   // サムネや動画リンクの中にあってもページ移動させない
   ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup'].forEach(type => window.addEventListener(type, async e => {
@@ -538,18 +565,27 @@
   }, true));
   function renderLaterFab() {
     let b = document.getElementById('tg-lfab');
-    const v = isWatchPage() ? new URLSearchParams(location.search).get('v') : null;
+    const v = isWatchPage() ? new URLSearchParams(location.search).get('v') : isShortsPage() ? location.pathname.split('/')[2] : null;
     if (!v) { b?.remove(); return; }
     if (!b) {
       b = document.createElement('button');
       b.id = 'tg-lfab';
       b.className = 'tg-lbtn';
+      if (isShortsPage()) b.dataset.short = '1';
       document.body.appendChild(b);
     }
     if (b.dataset.v !== v) b.dataset.v = v;
     paintLaterBtn(b);
   }
 
+  // 再生リスト・ミックス（束ねたサムネ）。ミックス・ステーションは最初の動画＋リストIDで「後で見る」に入れられる
+  const COLL_SEL = 'yt-collection-thumbnail-view-model, ytd-playlist-thumbnail, a[href^="/playlist"]';
+  const listIdOf = item => {
+    const a = item.querySelector('a[href*="list="]');
+    return (a?.getAttribute('href') || '').match(/[?&]list=([\w-]+)/)?.[1] || '';
+  };
+  const isShortItem = item => item.matches('ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytd-reel-item-renderer') || !!item.querySelector('ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, a[href^="/shorts/"]');
+  const META_SEL = 'yt-lockup-metadata-view-model, [class*="lockup-metadata" i], #meta, #details';
   function markVideos() {
     if (!favSet.size) return; // まだ登録チャンネルを読み込んでいない
     const app = document.querySelector('ytd-app');
@@ -560,7 +596,16 @@
       if (item.dataset.tgSig === sigNow && decoOk(item)) continue;
       if (item.closest('#tg-feed')) continue;
       item.dataset.tgSig = sigNow;
-      if (item.querySelector(MIX_SEL)) { if (item.dataset.tgfav) delete item.dataset.tgfav; continue; } // ミックス・再生リストは対象外
+      item.dataset.tgNeed = '';
+      const coll = !!item.querySelector(COLL_SEL);
+      const lvid = videoIdOf(item);
+      if (coll) {
+        // ミックス・再生リスト：枠は付けず、動画があるものだけ🕒
+        if (item.dataset.tgfav) delete item.dataset.tgfav;
+        if (item.parentElement?.closest(ITEM_SEL) || !lvid) continue;
+        placeRow(item, null, [], null, lvid, listIdOf(item));
+        continue;
+      }
       const links = [...item.querySelectorAll(CH_LINK_SEL)];
       let key = links.length ? TG.channelKey(links[0].getAttribute('href')) : null;
       let byName = null;
@@ -570,12 +615,11 @@
         if (nm) key = nameMap.get(nm) || null;
         if (!key) {
           // 名前で見つからない／名前が無い → 動画IDからチャンネルを調べる
-          const vid = videoIdOf(item);
-          if (vid) {
-            if (vidOwner.has(vid)) key = ownerKey(vidOwner.get(vid)) || (nm ? '__other' : null); // 調べても分からない＝登録外として赤枠
-            else { lookupOwner(vid); delete item.dataset.tgSig; } // 判別できたら後でもう一度
+          if (lvid) {
+            if (vidOwner.has(lvid)) key = ownerKey(vidOwner.get(lvid)) || (nm ? '__other' : null); // 調べても分からない＝登録外として赤枠
+            else { lookupOwner(lvid); delete item.dataset.tgSig; } // 判別できたら後でもう一度
           }
-          if (!key && nm && !vid) key = '__other';
+          if (!key && nm && !lvid) key = '__other';
         }
       }
       const val = key ? (favSet.has(key) ? '1' : '0') : '';
@@ -584,40 +628,62 @@
         else delete item.dataset.tgfav;
       }
       if (val) frameTarget(item);
-      item.dataset.tgNeed = val && item.querySelector(THUMB_SEL) ? 'f' : '';
-      // チャンネル名の横にフォルダ名
+      if (val && item.querySelector(THUMB_SEL)) item.dataset.tgNeed += 'f';
       if (item.parentElement?.closest(ITEM_SEL)) continue; // 入れ子は外側だけ
-      const folders = key ? fMap.get(key) || [] : [];
-      const lvid = videoIdOf(item);
-      const sig = folders.map(f => f.id + f.name + f.color).join('|') + '|' + (lvid || '');
-      const cur = item.querySelector(':scope .tg-ftags');
-      if (cur && cur.dataset.sig === sig && cur.isConnected) { item.dataset.tgNeed += 'r'; continue; }
-      cur?.remove();
-      if (!folders.length && !lvid) continue;
-      let anchor = byName;
+      placeRow(item, key, links, byName, lvid, '');
+    }
+  }
+  // チャンネル名の下に「🕒＋フォルダ名」の行。置き場所が無いもの（ショート等）はサムネの左上に🕒
+  function placeRow(item, key, links, byName, lvid, list) {
+    const folders = key ? fMap.get(key) || [] : [];
+    const short = isShortItem(item);
+    const sig = folders.map(f => f.id + f.name + f.color).join('|') + '|' + (lvid || '') + '|' + list;
+    const cur = item.querySelector('.tg-ftags, .tg-lov');
+    if (cur && cur.dataset.sig === sig && cur.isConnected) { item.dataset.tgNeed += cur.classList.contains('tg-lov') ? 'o' : 'r'; return; }
+    item.querySelectorAll('.tg-ftags, .tg-lov').forEach(x => x.remove());
+    if (!folders.length && !lvid) return;
+    let anchor = null, append = null;
+    if (!short) {
+      anchor = byName;
       if (!anchor) {
         const nameLink = links.find(l => l.textContent.trim() && !l.closest('#avatar, #avatar-link, yt-decorated-avatar-view-model'));
         anchor = nameLink ? nameLink.closest('ytd-channel-name') || nameLink : nameEl(item);
       }
-      if (!anchor) continue;
-      // チャンネル名の「行」の直後に専用の1行として入れる（同じ行だと幅が足りず切れる）
-      const ROW_SEL = '[class*="metadata-row" i], #byline-container, #channel-info, ytd-channel-name';
-      const row = anchor.closest(ROW_SEL);
-      if (row && item.contains(row)) anchor = row.closest('#channel-info') || row;
-      const span = document.createElement('div');
-      span.className = 'tg-ftags tg-ftags-row';
-      span.dataset.sig = sig;
-      if (lvid) span.appendChild(laterBtn(lvid));
-      folders.forEach(f => {
-        const t = document.createElement('span');
-        t.className = 'tg-ftag';
-        t.style.setProperty('--c', f.color);
-        t.textContent = f.name;
-        span.appendChild(t);
-      });
-      anchor.insertAdjacentElement('afterend', span);
-      item.dataset.tgNeed += 'r';
+      if (anchor) {
+        // チャンネル名の「行」の直後に専用の1行として入れる（同じ行だと幅が足りず切れる）
+        const ROW_SEL = '[class*="metadata-row" i], #byline-container, #channel-info, ytd-channel-name';
+        const row = anchor.closest(ROW_SEL);
+        if (row && item.contains(row)) anchor = row.closest('#channel-info') || row;
+      } else {
+        append = item.querySelector(META_SEL); // 名前が見つからない形式（音楽・ステーション等）は情報欄の最後に
+      }
     }
+    if (!anchor && !append) {
+      if (!lvid) return;
+      const t = item.querySelector(THUMB_SEL) || item.querySelector('a[href*="/shorts/"], a[href*="watch?v="]');
+      if (!t) return;
+      if (getComputedStyle(t).position === 'static') t.style.position = 'relative';
+      const b = laterBtn(lvid, list, short);
+      b.classList.add('tg-lov');
+      b.dataset.sig = sig;
+      t.appendChild(b);
+      item.dataset.tgNeed += 'o';
+      return;
+    }
+    const span = document.createElement('div');
+    span.className = 'tg-ftags tg-ftags-row';
+    span.dataset.sig = sig;
+    if (lvid) span.appendChild(laterBtn(lvid, list, short));
+    folders.forEach(f => {
+      const t = document.createElement('span');
+      t.className = 'tg-ftag';
+      t.style.setProperty('--c', f.color);
+      t.textContent = f.name;
+      span.appendChild(t);
+    });
+    if (anchor) anchor.insertAdjacentElement('afterend', span);
+    else append.appendChild(span);
+    item.dataset.tgNeed += 'r';
   }
   function decoOk(item) {
     const n = item.dataset.tgNeed || '';
@@ -626,6 +692,7 @@
       if (t && !t.classList.contains('tg-fr')) return false;
     }
     if (n.includes('r') && !item.querySelector('.tg-ftags')) return false;
+    if (n.includes('o') && !item.querySelector('.tg-lov')) return false;
     return true;
   }
 
@@ -773,6 +840,14 @@
   }
 
   function rawChannel() {
+    if (isShortsPage()) {
+      const box = document.querySelector('ytd-reel-video-renderer[is-active], ytd-shorts [is-active]') || document;
+      const a = box.querySelector('a[href^="/@"], a[href^="/channel/"]');
+      const key = a && TG.channelKey(a.getAttribute('href'));
+      const name = (a?.textContent || '').trim().replace(/^@/, '') || key;
+      const thumb = box.querySelector('img[src*="yt3."], yt-avatar-shape img')?.src || '';
+      return key ? { key, name, thumb } : null;
+    }
     if (isChannelPage()) {
       const key = TG.channelKey(location.pathname);
       const name =
@@ -794,7 +869,7 @@
   function renderFab() {
     renderLaterFab();
     let fab = document.getElementById('tg-fab');
-    if (!isChannelPage() && !isWatchPage()) {
+    if (!isChannelPage() && !isWatchPage() && !isShortsPage()) {
       fab?.remove();
       document.getElementById('tg-pop')?.remove();
       return;
@@ -906,12 +981,38 @@
     TGManager.open();
   }
 
+  // ---------- 画面内の通知（右下からスライド） ----------
+  const TOAST_MS = { high: 0, normal: 12000, low: 6000 }; // 0＝閉じるまで残す
+  function showToasts(items) {
+    let box = document.getElementById('tg-toasts');
+    if (!box) { box = document.createElement('div'); box.id = 'tg-toasts'; document.body.appendChild(box); }
+    const KIND = { live: '🔴 配信中', upcoming: '⏰ 配信予定', kw: '⚡ キーワード', new: '新着' };
+    items.slice(0, 6).forEach((it, i) => setTimeout(() => {
+      const t = document.createElement('div');
+      t.className = `tg-toast tg-lv-${it.level || 'normal'}`;
+      const when = it.kind === 'upcoming' && it.at ? ` ${new Date(it.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}〜` : '';
+      t.innerHTML = `<img src="https://i.ytimg.com/vi/${esc(it.v)}/mqdefault.jpg" alt="">
+        <div class="tg-t-body"><div class="tg-t-head"><span class="tg-t-kind">${KIND[it.kind] || '新着'}${esc(when)}</span><span class="tg-t-folder">${esc(it.folder || '')}</span></div>
+          <div class="tg-t-title">${esc(it.title || '')}</div><div class="tg-t-ch">${esc(it.ch || '')}</div></div>
+        <button class="tg-t-x" title="閉じる">✕</button>`;
+      const close = () => { t.classList.remove('in'); setTimeout(() => t.remove(), 350); };
+      t.querySelector('.tg-t-x').addEventListener('click', e => { e.stopPropagation(); close(); });
+      t.addEventListener('click', () => { close(); location.assign('/watch?v=' + encodeURIComponent(it.v)); });
+      box.appendChild(t);
+      requestAnimationFrame(() => requestAnimationFrame(() => t.classList.add('in')));
+      const ms = TOAST_MS[it.level || 'normal'];
+      if (ms) { let tm = setTimeout(close, ms); t.addEventListener('mouseenter', () => clearTimeout(tm)); t.addEventListener('mouseleave', () => { tm = setTimeout(close, 4000); }); }
+    }, i * 250));
+    if (items.length > 6) setTimeout(() => showToasts([{ v: items[6].v, title: `ほか ${items.length - 6} 本の新着があります`, ch: '', folder: '', level: 'low', kind: 'new' }]), 1700);
+  }
+
   // ---------- イベント ----------
   chrome.storage.onChanged.addListener(async changes => {
     if (changes.openManager?.newValue) checkOpenRequest();
     if (changes.watched) TGFeed.setWatched(changes.watched.newValue);
     if (changes.later) { TGFeed.setLater(changes.later.newValue); setLaterSet(changes.later.newValue || []); }
     if (changes.recent || changes.folderSeen || changes.watched || changes.later) refreshCounts();
+    if (changes.recent && isSubsFeed() && S.feedType === 'new') setTimeout(() => TGFeed.refresh(S), 300);
     if (changes.queue) TGX.syncQueue();
     if (changes.hideWatched) { S.hideWatched = !!changes.hideWatched.newValue; TGFeed.setHideWatched(S.hideWatched); }
     if (changes.cols) {
@@ -1047,6 +1148,13 @@
     if (id && v?.duration > 0 && isFinite(v.duration)) recordWatch(id, Math.round((v.currentTime / v.duration) * 100));
   });
 
+  // ショートは上下に送ってもページ移動の合図が出ないことがあるので、URLの変化を見る
+  let lastHref = location.href;
+  setInterval(() => {
+    if (location.href === lastHref || document.hidden) return;
+    lastHref = location.href;
+    if (isShortsPage()) { document.getElementById('tg-pop')?.remove(); renderFab(); setTimeout(renderFab, 800); }
+  }, 700);
   document.addEventListener('yt-navigate-finish', () => {
     trackWatch();
     TGX.syncQueue();
@@ -1099,6 +1207,7 @@
   // 新着の確認（15分以上たっていれば）。拡張機能のバックグラウンドからの依頼にも応える
   setTimeout(() => TGX.check().catch(() => {}), 4000);
   chrome.runtime.onMessage.addListener((m, _s, reply) => {
+    if (m?.type === 'tg-toast') { showToasts(m.items || []); reply({ ok: true }); return; }
     if (m?.type === 'tg-hist') {
       TGX.importHistory({ force: true }).then(r => reply({ ok: true, ...r }), e => reply({ ok: false, error: e.message }));
       return true;

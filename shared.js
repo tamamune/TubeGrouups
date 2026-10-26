@@ -32,11 +32,57 @@ const TG = {
     return TG._logChain;
   },
 
+  // ---------- 通知のルール ----------
+  //   folders: { フォルダID: { mode: 'off'|'now'|'window'|'kw', level: 'high'|'normal'|'low', from: 'HH:MM', to: 'HH:MM' } }
+  //   mode … now＝すぐ ／ window＝決めた時間帯だけ（時間外の新着は時間帯の始めにまとめて）／ kw＝キーワードを含むときだけすぐ
+  //   kw: 例外キーワード（カンマ区切り）… 含む動画はフォルダの設定に関係なくすぐ通知（kwAll=true なら通知オフ・未分類も）
+  //   live: 登録チャンネルの配信 { on, scope: 'all'|'notify', upcoming, level }
+  //   show: 'pc'（Windowsの通知）|'page'（YouTube画面の右下からスライド）|'both'   interval: 確認の間隔（分）
+  NOTIFY_DEF: {
+    folders: {}, kw: 'LIVE, 生配信, 配信中, 速報', kwLevel: 'high', kwAll: false,
+    live: { on: true, scope: 'all', upcoming: false, level: 'high' },
+    show: 'both', interval: 15
+  },
+  async notifyRules() {
+    const { notifyRules, notifyFolders = [] } = await chrome.storage.local.get(['notifyRules', 'notifyFolders']);
+    const D = TG.NOTIFY_DEF;
+    if (!notifyRules) { // 旧版の🔔（通知するフォルダ）を引き継ぐ
+      const folders = {};
+      notifyFolders.forEach(id => { folders[id] = { mode: 'now', level: 'normal' }; });
+      return { ...structuredClone(D), folders };
+    }
+    return { ...structuredClone(D), ...notifyRules, live: { ...D.live, ...(notifyRules.live || {}) }, folders: notifyRules.folders || {} };
+  },
+  // フォルダの設定（無ければ親フォルダの設定を引き継ぐ）
+  ruleFor(rules, folders, id) {
+    const byId = new Map(folders.map(f => [f.id, f]));
+    let f = byId.get(id), g = 0;
+    while (f && g++ < 50) {
+      const r = rules.folders[f.id];
+      if (r && r.mode) return { level: 'normal', from: '19:00', to: '23:00', ...r, from_: f.id };
+      f = byId.get(f.parent);
+    }
+    return { mode: 'off', level: 'normal' };
+  },
+  inWindow(from, to, t = new Date()) {
+    const m = s => { const [h, mi] = String(s || '0:0').split(':').map(Number); return (h || 0) * 60 + (mi || 0); };
+    const a = m(from), b = m(to), x = t.getHours() * 60 + t.getMinutes();
+    return a <= b ? x >= a && x < b : x >= a || x < b; // 22:00〜6:00 のような日またぎも可
+  },
+  // 次に時間帯が始まる時刻
+  nextWindowStart(from, t = Date.now()) {
+    const [h, mi] = String(from || '19:00').split(':').map(Number);
+    const d = new Date(t); d.setHours(h || 0, mi || 0, 0, 0);
+    if (d.getTime() <= t) d.setDate(d.getDate() + 1);
+    return d.getTime();
+  },
+  kwList: s => String(s || '').split(/[,、，\n]/).map(x => x.trim()).filter(Boolean),
+
   COLORS: ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#1e88e5', '#8e24aa', '#ec407a', '#6d4c41', '#757575'],
 
   async load() {
-    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind } =
-      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind']);
+    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind, newOff } =
+      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind', 'newOff']);
     if (!folders && Array.isArray(groups)) {
       channels = {};
       folders = groups.map(g => {
@@ -53,13 +99,14 @@ const TG = {
       folders: folders || [],
       meta: meta || {},
       activeGroup: activeGroup ?? null,
-      feedType: ['video', 'live', 'short', 'rec', 'later'].includes(feedType) ? feedType : 'video',
+      feedType: ['new', 'video', 'live', 'short', 'rec', 'later'].includes(feedType) ? feedType : 'video',
       cols: cols >= 3 && cols <= 7 ? cols : 4,
       // 未設定なら 動画3列・ショート5列。「自動」を選ぶと null が保存される
       homeCols: homeCols === null ? null : homeCols >= 3 && homeCols <= 7 ? homeCols : 3,
       homeShortCols: homeShortCols === null ? null : homeShortCols >= 3 && homeShortCols <= 7 ? homeShortCols : 5,
       hideWatched: !!hideWatched,
-      recKind: recKind === 'short' ? 'short' : 'video'
+      recKind: recKind === 'short' ? 'short' : 'video',
+      newOff: Array.isArray(newOff) ? newOff : [] // 新着動画で隠すカテゴリ（トップのフォルダID / '__unsorted'）
     };
   },
 
@@ -70,7 +117,7 @@ const TG = {
   AUX: {
     history: ['history', 'daily', 'watched', 'ytHistSeen'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
     later: ['later', 'laterRemoved'],                      // 後で見る（外した記録も）
-    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
+    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'notifyRules', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
   },
 
   // opts: { meta, history, later, prefs }（省略時はすべて含める）

@@ -634,7 +634,7 @@ const YTAPI = (() => {
   async function videoOwner(videoId) {
     const j = await call('player', { videoId });
     const d = j?.videoDetails;
-    return d?.channelId ? { k: 'channel/' + d.channelId, n: d.author || '' } : null;
+    return d?.channelId ? { k: 'channel/' + d.channelId, n: d.author || '', t: d.title || '' } : null;
   }
 
   // YouTube本体の「後で見る」再生リスト（最大 maxPages×100本）
@@ -661,5 +661,24 @@ const YTAPI = (() => {
     return true;
   }
 
-  return { removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
+  // ショートの連続再生と同じ「次のショート」の流れ（おすすめショートの追加読み込み用）
+  async function shortsSequence(seed, token, signal) {
+    const cfg = await getCfg();
+    let seq = token;
+    if (!seq) {
+      const j = await innertube('reel/reel_item_watch', { playerRequest: { videoId: seed }, disablePlayerResponse: true }, cfg, signal);
+      seq = j?.sequenceContinuation;
+      if (!seq) walk(j, (k, v) => { if (!seq && k === 'sequenceContinuation' && typeof v === 'string') seq = v; });
+      if (!seq) throw new Error('ショートの続きが見つかりません');
+    }
+    const j = await innertube('reel/reel_watch_sequence', { sequenceParams: seq }, cfg, signal);
+    const ids = [];
+    walk(j?.entries || j, (k, v) => { if (k === 'reelWatchEndpoint' && v?.videoId && !ids.includes(v.videoId)) ids.push(v.videoId); });
+    let next = null;
+    walk(j?.continuationEndpoint || {}, (k, v) => { if (k === 'continuationCommand' && v?.token) next = v.token; });
+    if (!next) walk(j, (k, v) => { if (!next && k === 'continuationCommand' && v?.token) next = v.token; });
+    return { ids, token: next };
+  }
+
+  return { shortsSequence, removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
 })();

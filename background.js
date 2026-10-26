@@ -248,9 +248,18 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 });
 
 // ---------- 新着の定期確認と通知 ----------
-// 15分ごとに、開いているYouTubeのタブに新着の確認を依頼する（YouTubeのログイン情報を使うため）
-chrome.runtime.onInstalled.addListener(() => chrome.alarms.create('tg-check', { periodInMinutes: 15, delayInMinutes: 1 }));
-chrome.runtime.onStartup.addListener(() => chrome.alarms.create('tg-check', { periodInMinutes: 15, delayInMinutes: 1 }));
+// 決めた間隔（初期15分）ごとに、開いているYouTubeのタブに新着の確認を依頼する（YouTubeのログイン情報を使うため）
+async function setupCheckAlarm() {
+  const iv = Math.max(5, (await TG.notifyRules()).interval || 15);
+  const a = await chrome.alarms.get('tg-check');
+  if (!a || a.periodInMinutes !== iv) chrome.alarms.create('tg-check', { periodInMinutes: iv, delayInMinutes: 1 });
+  const q = await chrome.alarms.get('tg-queue');
+  if (!q) chrome.alarms.create('tg-queue', { periodInMinutes: 5, delayInMinutes: 1 });
+}
+chrome.runtime.onInstalled.addListener(setupCheckAlarm);
+chrome.runtime.onStartup.addListener(setupCheckAlarm);
+setupCheckAlarm();
+chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.notifyRules) setupCheckAlarm(); });
 
 async function askTab(msg) {
   const tabs = await chrome.tabs.query({ url: 'https://www.youtube.com/*' });
@@ -264,33 +273,78 @@ async function askTab(msg) {
 const askTabToCheck = force => askTab({ type: 'tg-check', force });
 
 chrome.alarms.onAlarm.addListener(a => {
-  if (a.name !== 'tg-check') return;
-  askTabToCheck(false).then(r => { if (r && r.ok === false) TG.log('新着', '定期確認：' + r.error, 'warn'); });
+  if (a.name === 'tg-check') {
+    flushQueue();
+    askTabToCheck(false).then(r => { if (r && r.ok === false) TG.log('新着', '定期確認：' + r.error, 'warn'); });
+  }
+  if (a.name === 'tg-queue') flushQueue();
 });
 
+// 時間帯待ちの通知を、時間になったら出す
+async function flushQueue() {
+  const { notifyQueue = [] } = await chrome.storage.local.get('notifyQueue');
+  if (!notifyQueue.length) return;
+  const now = Date.now();
+  const due = notifyQueue.filter(x => x.due <= now);
+  if (!due.length) return;
+  await chrome.storage.local.set({ notifyQueue: notifyQueue.filter(x => x.due > now) });
+  // 古すぎるもの（2日以上待った）は出さない
+  deliver(due.filter(x => now - x.due < 2 * 864e5), '時間帯');
+}
+
 const notifUrl = new Map();
+const LV = { high: 3, normal: 2, low: 1 };
+const KIND = { live: '🔴 配信中', upcoming: '⏰ 配信予定', kw: '⚡', new: '' };
+const label = it => `${KIND[it.kind] ? KIND[it.kind] + ' ' : ''}【${it.folder}】${it.ch}`;
+const watchUrl = v => 'https://www.youtube.com/watch?v=' + v;
+
+async function deliver(items, why = '') {
+  if (!items.length) return;
+  const rules = await TG.notifyRules();
+  TG.log('通知', `${why ? why + '：' : ''}${items.length}本 ` + items.slice(0, 5).map(x => `${label(x)}（${x.level === 'high' ? '高' : x.level === 'low' ? '低' : '中'}）`).join('、'));
+  let toPage = rules.show !== 'pc', toPc = rules.show !== 'page';
+  if (toPage) {
+    const r = await askTab({ type: 'tg-toast', items });
+    if (!r?.ok) { toPage = false; toPc = true; } // YouTubeのタブが無ければPCの通知で
+  }
+  if (!toPc) return;
+  const icon = chrome.runtime.getURL('icons/icon128.png');
+  // 重要度の高いものは個別に（閉じるまで残す）、ほかは4本以上ならまとめて1つに
+  const high = items.filter(x => x.level === 'high');
+  const rest = items.filter(x => x.level !== 'high');
+  const single = it => {
+    const id = 'tg-' + it.v + '-' + Date.now() + Math.random().toString(36).slice(2, 5);
+    notifUrl.set(id, watchUrl(it.v));
+    const when = it.kind === 'upcoming' && it.at ? `（${new Date(it.at).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}〜）` : '';
+    chrome.notifications.create(id, {
+      type: 'basic', iconUrl: icon, title: label(it), message: it.title + when,
+      priority: it.level === 'high' ? 2 : it.level === 'low' ? 0 : 1,
+      requireInteraction: it.level === 'high', silent: it.level === 'low'
+    });
+  };
+  high.forEach(single);
+  if (rest.length <= 3) rest.forEach(single);
+  else {
+    const id = 'tg-many-' + Date.now();
+    notifUrl.set(id, 'https://www.youtube.com/feed/subscriptions');
+    const folders = [...new Set(rest.map(x => x.folder))].join('・');
+    chrome.notifications.create(id, {
+      type: 'list', iconUrl: icon, title: `新着 ${rest.length} 本（${folders}）`, message: '',
+      items: rest.slice(0, 5).map(x => ({ title: x.ch, message: x.title })), priority: 1,
+      silent: rest.every(x => x.level === 'low')
+    });
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === 'tg-check-now') { askTabToCheck(true).then(reply); return true; }
   if (msg?.type === 'tg-hist-now') { askTab({ type: 'tg-hist' }).then(reply); return true; }
-  if (msg?.type !== 'tg-notify') return;
-  const items = msg.items || [];
-  TG.log('通知', `PC通知 ${items.length}本：` + items.slice(0, 5).map(x => `【${x.folder}】${x.ch}`).join('、'));
-  const icon = chrome.runtime.getURL('icons/icon128.png');
-  if (items.length <= 3) {
-    for (const it of items) {
-      const id = 'tg-' + it.v + '-' + Date.now();
-      notifUrl.set(id, 'https://www.youtube.com/watch?v=' + it.v);
-      chrome.notifications.create(id, { type: 'basic', iconUrl: icon, title: `【${it.folder}】${it.ch}`, message: it.title, priority: 1 });
-    }
-  } else {
-    const id = 'tg-many-' + Date.now();
-    notifUrl.set(id, 'https://www.youtube.com/feed/subscriptions');
-    const folders = [...new Set(items.map(x => x.folder))].join('・');
-    chrome.notifications.create(id, {
-      type: 'list', iconUrl: icon, title: `新着 ${items.length} 本（${folders}）`, message: '',
-      items: items.slice(0, 5).map(x => ({ title: x.ch, message: x.title })), priority: 1
-    });
+  if (msg?.type === 'tg-notify-test') {
+    deliver([{ v: 'dQw4w9WgXcQ', title: 'テスト通知です（クリックで動画を開きます）', ch: 'TubeGroups', folder: 'テスト', level: msg.level || 'normal', kind: msg.kind || 'new' }], 'テスト').then(() => reply({ ok: true }));
+    return true;
   }
+  if (msg?.type !== 'tg-notify') return;
+  deliver(msg.items || []);
 });
 
 chrome.notifications.onClicked.addListener(id => {

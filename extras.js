@@ -12,12 +12,13 @@ const TGX = (() => {
   async function check({ force = false } = {}) {
     const now = Date.now();
     const { lastCheckAt = 0, checkLock = 0 } = await chrome.storage.local.get(['lastCheckAt', 'checkLock']);
-    if (!force && now - lastCheckAt < CHECK_MIN * 60e3) return { skipped: true };
+    const iv = Math.max(5, (await TG.notifyRules()).interval || CHECK_MIN);
+    if (!force && now - lastCheckAt < (iv - 0.5) * 60e3) return { skipped: true };
     if (now - checkLock < 90e3) return { busy: true }; // 他のタブが確認中
     await chrome.storage.local.set({ checkLock: now });
     try {
       const list = await YTAPI.subsFeed({ maxPages: 4, maxAge: NEW_DAYS * 864e5 });
-      const recent = list.slice(0, 400).map(x => ({ v: x.v, t: x.t, p: x.p, k: x.chKey, id: x.chId, n: x.chName, w: x.w || 0, live: !!x.live }));
+      const recent = list.slice(0, 400).map(x => ({ v: x.v, t: x.t, p: x.p, k: x.chKey, id: x.chId, n: x.chName, w: x.w || 0, live: !!x.live, ...(x.upcoming ? { up: x.upcoming } : {}) }));
       await chrome.storage.local.set({ recent, lastCheckAt: Date.now() });
       await notifyNew(recent);
       TG.log('新着', `登録チャンネルの新着を確認：直近${NEW_DAYS}日 ${recent.length}本${force ? '（手動）' : ''}`);
@@ -73,29 +74,59 @@ const TGX = (() => {
   }
 
   // ---------- 通知 ----------
+  //   フォルダごとのルール（すぐ／時間帯／キーワードだけ／オフ）・重要度・例外キーワード・配信 で決める
+  //   すぐ知らせるもの → バックグラウンドへ tg-notify ／ 時間帯待ち → notifyQueue に入れ、時間になったらバックグラウンドが出す
+  const LV = { high: 3, normal: 2, low: 1 };
+  const MODE = { now: 4, kw: 3, window: 2, off: 0 };
   async function notifyNew(recent) {
     const d = await TG.load();
-    const { notifyFolders = [], notified } = await chrome.storage.local.get(['notifyFolders', 'notified']);
+    const rules = await TG.notifyRules();
+    const { notified, notifyQueue = [] } = await chrome.storage.local.get(['notified', 'notifyQueue']);
     const ids = new Set(recent.map(x => x.v));
     if (!Array.isArray(notified)) { // 初回は既存分を通知済み扱いにする
-      await chrome.storage.local.set({ notified: [...ids] });
+      await chrome.storage.local.set({ notified: [...ids, ...recent.filter(x => x.live).map(x => 'L:' + x.v), ...recent.filter(x => x.up > Date.now()).map(x => 'U:' + x.v)] });
       return;
     }
     const done = new Set(notified);
-    const targets = notifyFolders.filter(id => d.folders.some(f => f.id === id));
-    const out = [];
-    for (const fid of targets) {
-      const f = d.folders.find(x => x.id === fid);
-      const ks = TG.matchSet(d.channels, [...TG.folderKeys(d.folders, fid)]);
-      for (const x of recent) {
-        if (done.has(x.v) || Date.now() - x.p > 864e5) continue;
-        if (!(ks.has(x.k) || (x.id && ks.has('channel/' + x.id)))) continue;
+    const fmap = TG.folderMap(d.channels, d.folders);
+    const subs = TG.matchSet(d.channels, Object.values(d.channels).filter(c => !c.unsub).map(c => c.key));
+    const kws = TG.kwList(rules.kw).map(k => k.toLowerCase());
+    const now = Date.now();
+    const out = [], queue = [...notifyQueue];
+    for (const x of recent) {
+      const fs = fmap.get(x.k) || (x.id && fmap.get('channel/' + x.id)) || [];
+      // 一番強い設定のフォルダを使う（すぐ ＞ キーワード ＞ 時間帯）
+      let best = { mode: 'off', level: 'normal' }, folder = fs[0]?.name || '未分類';
+      for (const f of fs) {
+        const r = TG.ruleFor(rules, d.folders, f.id);
+        if (MODE[r.mode] > MODE[best.mode] || (r.mode === best.mode && LV[r.level] > LV[best.level])) { best = r; folder = f.name; }
+      }
+      const base = { v: x.v, title: x.t, ch: x.n, folder };
+      const isSub = subs.has(x.k) || (x.id && subs.has('channel/' + x.id));
+      // 配信（登録チャンネル）
+      if (rules.live.on && isSub && (rules.live.scope === 'all' || best.mode !== 'off')) {
+        if (x.live && !done.has('L:' + x.v)) { done.add('L:' + x.v); done.add(x.v); out.push({ ...base, level: rules.live.level, kind: 'live' }); continue; }
+        if (rules.live.upcoming && x.up > now && !done.has('U:' + x.v)) { done.add('U:' + x.v); done.add(x.v); out.push({ ...base, level: rules.live.level, kind: 'upcoming', at: x.up }); continue; }
+      }
+      if (done.has(x.v) || now - x.p > 864e5 || x.up > now) continue;
+      const title = (x.t || '').toLowerCase();
+      const hitKw = kws.find(k => title.includes(k));
+      // 例外キーワード：含んでいればすぐ
+      if (hitKw && (best.mode !== 'off' || (rules.kwAll && isSub))) {
+        done.add(x.v); out.push({ ...base, level: rules.kwLevel, kind: 'kw', kw: hitKw }); continue;
+      }
+      if (best.mode === 'now') { done.add(x.v); out.push({ ...base, level: best.level, kind: 'new' }); continue; }
+      if (best.mode === 'window') {
         done.add(x.v);
-        out.push({ v: x.v, title: x.t, ch: x.n, folder: f.name });
+        const item = { ...base, level: best.level, kind: 'new' };
+        if (TG.inWindow(best.from, best.to)) out.push(item);
+        else queue.push({ ...item, due: TG.nextWindowStart(best.from) });
+        continue;
       }
     }
     recent.forEach(x => done.add(x.v)); // 通知対象外の新着も記録（後でフォルダに入れても昔の動画は通知しない）
-    await chrome.storage.local.set({ notified: [...done].slice(-1500) });
+    await chrome.storage.local.set({ notified: [...done].slice(-3000), notifyQueue: queue.slice(-300) });
+    if (queue.length > notifyQueue.length) TG.log('通知', `時間帯待ちに ${queue.length - notifyQueue.length}本（${new Date(Math.min(...queue.map(q => q.due))).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })} から通知）`);
     if (out.length) chrome.runtime.sendMessage({ type: 'tg-notify', items: out }).catch(() => {});
   }
 
@@ -115,7 +146,7 @@ const TGX = (() => {
     S.folders.forEach(f => res.set(f.id, 0));
     res.set('__unsorted', 0); res.set('__all', 0);
     for (const x of recent) {
-      if (now - x.p > NEW_DAYS * 864e5) continue;
+      if (now - x.p > NEW_DAYS * 864e5 || x.up > now) continue;
       if (hidden.has(x.k) || (x.id && hidden.has('channel/' + x.id))) continue;
       if (Math.max(x.w || 0, watched[x.v]?.p || 0) >= WATCHED) continue;
       if (x.p > (seen.__all || 0)) res.set('__all', res.get('__all') + 1);
@@ -153,7 +184,7 @@ const TGX = (() => {
       laterRemoved[it.v] = Date.now();
       await chrome.storage.local.set({ laterRemoved });
     }
-    else later.unshift({ v: it.v, t: it.t, p: it.p || 0, th: it.th || '', n: it.n || 0, ch: { key: it.ch.key, name: it.ch.name, unsub: !!it.ch.unsub }, at: Date.now() });
+    else later.unshift({ v: it.v, t: it.t, p: it.p || 0, th: it.th || '', n: it.n || 0, ...(it.list ? { list: it.list } : {}), ...(it.short ? { short: true } : {}), ch: { key: it.ch?.key || '', name: it.ch?.name || '', unsub: !!it.ch?.unsub }, at: Date.now() });
     await chrome.storage.local.set({ later: later.slice(0, 1000) });
     TG.log('後で見る', `${i < 0 ? '追加' : '外す'}：${it.t || it.v}（計 ${Math.min(later.length, 1000)}本）`);
     return i < 0;
