@@ -1,0 +1,665 @@
+// YouTubeからのデータ取得（登録チャンネル一覧・最終投稿）
+const YTAPI = (() => {
+  // ---------- HTML内のJSON抽出 ----------
+  function extractObject(text, start) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === '\\') esc = true;
+        else if (c === '"') inStr = false;
+        continue;
+      }
+      if (c === '"') inStr = true;
+      else if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) return text.slice(start, i + 1);
+    }
+    return null;
+  }
+
+  function findJson(html, marker) {
+    let i = html.indexOf(marker);
+    if (i < 0) return null;
+    i = html.indexOf('{', i);
+    try { return JSON.parse(extractObject(html, i)); } catch { return null; }
+  }
+
+  function findCfg(html) {
+    const cfg = {};
+    let i = 0;
+    while ((i = html.indexOf('ytcfg.set({', i)) >= 0) {
+      const s = extractObject(html, i + 10);
+      i += 10;
+      try { Object.assign(cfg, JSON.parse(s)); } catch { /* skip */ }
+    }
+    return cfg;
+  }
+
+  // ---------- InnerTube API（ログイン中のセッションで呼ぶ） ----------
+  async function sha1(s) {
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(s));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function cookie(name) {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/[-[\]/{}()*+?.\\^$|]/g, '\\$&') + '=([^;]*)'));
+    return m ? m[1] : null;
+  }
+
+  async function authHeader() {
+    const ts = Math.floor(Date.now() / 1000);
+    const origin = 'https://www.youtube.com';
+    const parts = [];
+    const pairs = [
+      ['SAPISIDHASH', cookie('SAPISID') || cookie('__Secure-3PAPISID')],
+      ['SAPISID1PHASH', cookie('__Secure-1PAPISID')],
+      ['SAPISID3PHASH', cookie('__Secure-3PAPISID')]
+    ];
+    for (const [label, val] of pairs) {
+      if (val) parts.push(`${label} ${ts}_${await sha1(`${ts} ${val} ${origin}`)}`);
+    }
+    return parts.join(' ');
+  }
+
+  async function innertube(endpoint, body, cfg, signal) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-Origin': 'https://www.youtube.com',
+      'X-Goog-AuthUser': String(cfg.SESSION_INDEX ?? 0),
+      'X-Youtube-Client-Name': String(cfg.INNERTUBE_CONTEXT_CLIENT_NAME ?? 1),
+      'X-Youtube-Client-Version': cfg.INNERTUBE_CLIENT_VERSION || ''
+    };
+    const auth = await authHeader();
+    if (auth) headers.Authorization = auth;
+    if (cfg.DELEGATED_SESSION_ID) headers['X-Goog-PageId'] = cfg.DELEGATED_SESSION_ID;
+    const url = `/youtubei/v1/${endpoint}?prettyPrint=false` + (cfg.INNERTUBE_API_KEY ? `&key=${cfg.INNERTUBE_API_KEY}` : '');
+    const r = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      signal,
+      body: JSON.stringify({ context: cfg.INNERTUBE_CONTEXT, ...body })
+    });
+    if (!r.ok) {
+      TG.log('YouTube', `${endpoint}${body?.browseId ? ' ' + body.browseId : ''} がエラー (${r.status})`, 'warn');
+      throw new Error(`YouTube API エラー (${r.status})`);
+    }
+    return r.json();
+  }
+
+  // ---------- JSON走査 ----------
+  const SKIP = new Set(['adSlotRenderer', 'promotedSparklesWebRenderer', 'promotedVideoRenderer', 'statementBannerRenderer']);
+  function walk(node, fn) {
+    if (Array.isArray(node)) node.forEach(n => walk(n, fn));
+    else if (node && typeof node === 'object') {
+      for (const k in node) {
+        if (SKIP.has(k)) continue; // 広告は読まない
+        fn(k, node[k]);
+        walk(node[k], fn);
+      }
+    }
+  }
+  const text = t => (typeof t === 'string' ? t : t?.simpleText ?? t?.runs?.map(r => r.text).join('') ?? t?.content ?? '');
+  function walkPath(node, fn, stack = []) {
+    if (node && typeof node === 'object') {
+      stack.push(node);
+      for (const k in node) {
+        fn(k, node[k], stack);
+        walkPath(node[k], fn, stack);
+      }
+      stack.pop();
+    }
+  }
+  function thumbOf(r) {
+    const a = r?.thumbnail?.thumbnails;
+    let u = a?.[a.length - 1]?.url || '';
+    if (u.startsWith('//')) u = 'https:' + u;
+    return u;
+  }
+
+  function add(out, id, name, base, thumb, maybeHandle) {
+    let key = TG.channelKey(base);
+    if (!key && /^@/.test(maybeHandle || '')) key = TG.channelKey('/' + maybeHandle);
+    if (!key) key = 'channel/' + id;
+    out.set(id, { id, key, name, thumb });
+  }
+
+  function parsePage(json, out) {
+    let token = null;
+    walk(json, (k, v) => {
+      if ((k === 'channelRenderer' || k === 'gridChannelRenderer') && v?.channelId) {
+        add(out, v.channelId, text(v.title), v.navigationEndpoint?.browseEndpoint?.canonicalBaseUrl, thumbOf(v), text(v.subscriberCountText));
+      } else if (k === 'continuationCommand' && v?.token) {
+        token = v.token;
+      }
+    });
+    return token;
+  }
+
+  function parseGuide(json, out) {
+    walk(json, (k, v) => {
+      if (k === 'guideEntryRenderer') {
+        const b = v?.navigationEndpoint?.browseEndpoint;
+        if (b?.browseId?.startsWith('UC')) add(out, b.browseId, text(v.formattedTitle), b.canonicalBaseUrl, thumbOf(v), '');
+      }
+    });
+  }
+
+  // 登録チャンネル一覧を全件取得
+  async function fetchSubscriptions(onProgress = () => {}) {
+    const html = await (await fetch('/feed/channels', { credentials: 'include' })).text();
+    const cfg = findCfg(html);
+    if (cfg.LOGGED_IN === false) throw new Error('YouTubeにログインしていません');
+    const data = findJson(html, 'ytInitialData = ') || findJson(html, 'ytInitialData"] = ');
+    const out = new Map();
+    let token = data ? parsePage(data, out) : null;
+    onProgress(out.size);
+    const seen = new Set();
+    let n = 0;
+    while (token && !seen.has(token) && n++ < 300) {
+      seen.add(token);
+      token = parsePage(await innertube('browse', { continuation: token }, cfg), out);
+      onProgress(out.size);
+    }
+    // 予備：サイドバー（ガイド）から取得
+    if (out.size === 0) {
+      try { parseGuide(await innertube('guide', {}, cfg), out); } catch { /* ignore */ }
+    }
+    return [...out.values()];
+  }
+
+  // ---------- 最終投稿日（RSS） ----------
+  async function resolveId(key, signal) {
+    const r = await fetch(TG.channelUrl(key), { credentials: 'omit', signal });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const m =
+      html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[\w-]{22})"/) ||
+      html.match(/"externalId":"(UC[\w-]{22})"/) ||
+      html.match(/itemprop="identifier" content="(UC[\w-]{22})"/);
+    return m?.[1] || null;
+  }
+
+  async function fetchFeed(id, signal) {
+    const r = await fetch(`/feeds/videos.xml?channel_id=${encodeURIComponent(id)}`, { credentials: 'omit', signal });
+    if (!r.ok) return { last: null, interval: null, count: 0 };
+    const doc = new DOMParser().parseFromString(await r.text(), 'application/xml');
+    const ds = [...doc.getElementsByTagName('entry')]
+      .map(e => Date.parse(e.getElementsByTagName('published')[0]?.textContent || ''))
+      .filter(Boolean)
+      .sort((a, b) => b - a);
+    return {
+      last: ds[0] || null,
+      interval: ds.length > 1 ? (ds[0] - ds[ds.length - 1]) / (ds.length - 1) / 864e5 : null,
+      count: ds.length
+    };
+  }
+
+  // 最終投稿：チャンネルの「動画」→「ライブ」タブ（内部API）。どちらも無ければ「ショート」の有無を確認
+  //   戻り値: { id, last, interval, count, shortsOnly?, error? }
+  async function fetchMeta(ch, signal) {
+    let id = ch.id || (ch.key.startsWith('channel/') ? ch.key.slice(8) : null);
+    if (!id) id = await resolveId(ch.key, signal);
+    if (!id) return { id: null, last: null, interval: null, count: 0, error: true };
+    let failed = false;
+    try {
+      const videos = await channelTab(id, 'video', signal);
+      let list = videos.filter(x => x.p);
+      if (!list.length) list = (await channelTab(id, 'live', signal)).filter(x => x.p && !x.upcoming);
+      if (!list.length && videos.length) return { id, last: null, interval: null, count: videos.length, nodate: true };
+      if (list.length) {
+        const ds = list.map(x => x.p).sort((a, b) => b - a);
+        const iv = ds.length > 1 ? (ds[0] - ds[ds.length - 1]) / (ds.length - 1) / 864e5 : null;
+        return { id, last: ds[0], interval: iv > 0 ? iv : null, count: ds.length };
+      }
+      const shorts = await channelTab(id, 'short', signal);
+      if (shorts.length) return { id, last: null, interval: null, count: shorts.length, shortsOnly: true };
+      return { id, last: null, interval: null, count: 0 };
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      failed = true;
+    }
+    try {
+      const r = await fetchFeed(id, signal);
+      if (r.last) return { id, ...r };
+    } catch { /* RSSも不可 */ }
+    return { id, last: null, interval: null, count: 0, error: failed };
+  }
+
+  // チャンネルの人気動画（「動画」タブの「人気順」）
+  async function channelPopular(id, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const json = await innertube('browse', { context, browseId: id, params: TAB_PARAMS.video }, cfg, signal);
+    let token = null;
+    walkPath(json, (k, v, stack) => {
+      if (token || k !== 'continuationCommand' || !v?.token) return;
+      for (let i = stack.length - 1; i >= Math.max(0, stack.length - 8); i--) {
+        const o = stack[i];
+        if (Array.isArray(o)) continue;
+        const t = text(o.text) || text(o.title);
+        if (t) { if (/^\s*popular\s*$/i.test(t)) token = v.token; break; }
+      }
+    });
+    if (!token) return [];
+    return parseTab(await innertube('browse', { context, continuation: token }, cfg, signal));
+  }
+
+  // ---------- チャンネルのタブ（動画 / ライブ / ショート） ----------
+  const TAB_PARAMS = {
+    video: 'EgZ2aWRlb3PyBgQKAjoA',
+    short: 'EgZzaG9ydHPyBgUKA5oBAA==',
+    live: 'EgdzdHJlYW1z8gYECgJ6AA=='
+  };
+  const UNIT = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e5, month: 2592e6, year: 31536e6 };
+  const UNIT_JA = { '秒': 1e3, '分': 6e4, '時間': 36e5, '日': 864e5, '週間': 6048e5, 'か月': 2592e6, 'ヶ月': 2592e6, 'ヵ月': 2592e6, '年': 31536e6 };
+
+  function agoMs(s) {
+    if (!s) return null;
+    let m = s.match(/(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago/i);
+    if (m) return +m[1] * UNIT[m[2].toLowerCase()];
+    m = s.match(/(\d+)\s*(秒|分|時間|日|週間|か月|ヶ月|ヵ月|年)前/);
+    if (m) return +m[1] * UNIT_JA[m[2]];
+    return null;
+  }
+
+  // 視聴済みの割合（YouTubeの「続きから再生」バー）
+  function watchedPct(obj) {
+    let pct = 0;
+    walk(obj, (k, v) => {
+      if (k === 'thumbnailOverlayResumePlaybackRenderer' && v?.percentDurationWatched != null) pct = Math.max(pct, +v.percentDurationWatched || 0);
+      if (k === 'thumbnailOverlayProgressBarViewModel' && v?.startPercent != null) pct = Math.max(pct, +v.startPercent || 0);
+    });
+    return pct;
+  }
+
+  // 動画の長さ（「12:34」「1:02:03」の表示から秒に）
+  function durationOf(obj) {
+    let found = 0;
+    const scan = o => {
+      if (found || !o || typeof o !== 'object') return;
+      for (const k in o) {
+        const v = o[k];
+        if (typeof v === 'string') {
+          const m = v.match(/^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})$/);
+          if (m) { found = (+m[1] || 0) * 3600 + +m[2] * 60 + +m[3]; return; }
+        } else scan(v);
+        if (found) return;
+      }
+    };
+    scan(obj);
+    return found;
+  }
+
+  function deepAgo(obj, title) {
+    let found = null;
+    const scan = o => {
+      if (found != null || !o || typeof o !== 'object') return;
+      for (const k in o) {
+        const v = o[k];
+        if (typeof v === 'string') {
+          if (v.length < 80 && v !== title) { const d = agoMs(v); if (d != null) { found = d; return; } }
+        } else scan(v);
+        if (found != null) return;
+      }
+    };
+    scan(obj);
+    return found;
+  }
+
+  function viewsNum(s) {
+    if (!s) return 0;
+    let m = s.replace(/,/g, '').match(/([\d.]+)\s*([KMB])?/i);
+    if (/[万億]/.test(s)) {
+      m = s.replace(/,/g, '').match(/([\d.]+)\s*(万|億)?/);
+      return m ? Math.round(+m[1] * (m[2] === '億' ? 1e8 : m[2] === '万' ? 1e4 : 1)) : 0;
+    }
+    return m ? Math.round(+m[1] * ({ k: 1e3, m: 1e6, b: 1e9 }[(m[2] || '').toLowerCase()] || 1)) : 0;
+  }
+
+  const lastUrl = arr => {
+    let u = arr?.[arr.length - 1]?.url || '';
+    if (u.startsWith('//')) u = 'https:' + u;
+    return u;
+  };
+
+  function parseTab(json) {
+    const out = [];
+    const seen = new Set();
+    let cur = null;
+    const push = it => { if (it.v && !seen.has(it.v)) { seen.add(it.v); it._raw = cur; out.push(it); } };
+    walk(json, (k, v) => {
+      cur = v;
+      if (!v || typeof v !== 'object') return;
+      if (k === 'videoRenderer' || k === 'gridVideoRenderer' || k === 'playlistVideoRenderer') {
+        const badges = JSON.stringify(v.badges || []) + JSON.stringify(v.thumbnailOverlays || []);
+        const run = (v.ownerText || v.longBylineText || v.shortBylineText)?.runs?.[0];
+        push({
+          ...chInfo(run?.navigationEndpoint?.browseEndpoint, run?.text),
+          v: v.videoId,
+          t: text(v.title),
+          ago: text(v.publishedTimeText),
+          n: viewsNum(text(v.viewCountText) || text(v.shortViewCountText)),
+          thumb: lastUrl(v.thumbnail?.thumbnails),
+          live: /LIVE/.test(badges) && !v.upcomingEventData && !text(v.publishedTimeText),
+          upcoming: v.upcomingEventData ? +v.upcomingEventData.startTime * 1000 : null
+        });
+      } else if (k === 'lockupViewModel' && v.contentId && !/PLAYLIST|CHANNEL/.test(v.contentType || '')) {
+        const parts = [];
+        walk(v.metadata, (kk, vv) => { if (kk === 'metadataParts' && Array.isArray(vv)) vv.forEach(p => parts.push(text(p?.text))); });
+        const ago = parts.find(p => agoMs(p) != null) || '';
+        const all = JSON.stringify(v.contentImage || {});
+        let thumb = '';
+        walk(v.contentImage, (kk, vv) => { if (!thumb && kk === 'sources' && Array.isArray(vv)) thumb = lastUrl(vv); });
+        let be = null;
+        walk(v.metadata, (kk, vv) => { if (!be && kk === 'browseEndpoint' && vv?.browseId?.startsWith('UC')) be = vv; });
+        push({
+          ...chInfo(be, parts.find(p => p && agoMs(p) == null && !/view|視聴|watching/i.test(p))),
+          v: v.contentId,
+          t: text(v.metadata?.lockupMetadataViewModel?.title),
+          ago,
+          n: viewsNum(parts.find(p => /view|視聴/i.test(p)) || ''),
+          thumb,
+          live: /LIVE/.test(all) && !ago,
+          upcoming: null
+        });
+      } else if (k === 'shortsLockupViewModel') {
+        const id = v.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId || (v.entityId || '').replace(/^shorts-shelf-item-/, '');
+        push({ v: id, t: text(v.overlayMetadata?.primaryText) || text(v.accessibilityText), ago: '', n: viewsNum(text(v.overlayMetadata?.secondaryText)), thumb: lastUrl(v.thumbnail?.sources), live: false, upcoming: null, short: true });
+      } else if (k === 'reelItemRenderer') {
+        push({ v: v.videoId, t: text(v.headline), ago: '', n: viewsNum(text(v.viewCountText)), thumb: lastUrl(v.thumbnail?.thumbnails), live: false, upcoming: null, short: true });
+      }
+    });
+    const now = Date.now();
+    return out.map((it, i) => {
+      let d = agoMs(it.ago);
+      if (d == null && it._raw) d = deepAgo(it._raw, it.t); // 項目の中の文字列を総当たりで探す
+      if (it._raw) { it.w = watchedPct(it._raw); it.dur = durationOf(it._raw); }
+      delete it._raw;
+      return { ...it, p: it.upcoming || (it.live ? now : d != null ? now - d - i : null), i };
+    });
+  }
+
+  function chInfo(be, name) {
+    const chId = be?.browseId?.startsWith('UC') ? be.browseId : null;
+    const chKey = TG.channelKey(be?.canonicalBaseUrl) || (chId ? 'channel/' + chId : null);
+    return { chId, chKey, chName: name || '' };
+  }
+
+  // 一覧の「続き」の目印（ジャンル切り替えボタン等のものは使わない）
+  function lastToken(json) {
+    let token = null;
+    walk(json, (k, v) => {
+      if (k !== 'continuationItemRenderer' || !v) return;
+      walk(v, (kk, vv) => { if (kk === 'continuationCommand' && vv?.token) token = vv.token; });
+    });
+    return token;
+  }
+
+  // ホームのおすすめ（1ページ分）。token を渡すと続きを取得
+  async function recommended(token, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const body = token ? { context, continuation: token } : { context, browseId: 'FEwhat_to_watch' };
+    const json = await innertube('browse', body, cfg, signal);
+    return { items: parseTab(json), token: lastToken(json) };
+  }
+
+  // 返ってきたタブが本当に目的のタブか確認する（そのタブが無いチャンネルでは、YouTubeは「ホーム」等を返してくる）
+  const TAB_SUFFIX = { video: '/videos', live: '/streams', short: '/shorts' };
+  const tabUrl = t => t?.endpoint?.commandMetadata?.webCommandMetadata?.url || '';
+  function findTabs(json) {
+    const tabs = [];
+    walk(json, (k, v) => { if ((k === 'tabRenderer' || k === 'expandableTabRenderer') && v) tabs.push(v); });
+    return tabs;
+  }
+
+  // 登録チャンネルの新着（YouTubeの「登録チャンネル」フィード）。maxAge より古くなるか maxPages で止める
+  async function subsFeed({ maxPages = 4, maxAge = 3 * 864e5 } = {}, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    let token = null, out = [];
+    for (let page = 0; page < maxPages; page++) {
+      const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId: 'FEsubscriptions' }, cfg, signal);
+      const list = parseTab(json).filter(x => x.chKey && x.p);
+      out = out.concat(list);
+      token = lastToken(json);
+      if (!token || !list.length || list.every(x => Date.now() - x.p > maxAge)) break;
+    }
+    const seen = new Set();
+    return out.filter(x => !seen.has(x.v) && seen.add(x.v) && Date.now() - x.p <= maxAge);
+  }
+
+  // ---------- コメント ----------
+  // 1ページ分のコメントと次ページの目印を取り出す（新形式 commentEntityPayload / 旧形式 commentRenderer の両対応）
+  function parseComments(json) {
+    const byId = new Map(), order = [];
+    walk(json, (k, v) => {
+      if (k === 'commentEntityPayload' && v?.properties) {
+        const id = v.properties.commentId;
+        byId.set(id, {
+          id, text: text(v.properties.content), author: v.author?.displayName || '',
+          likes: v.toolbar?.likeCountNotliked || v.toolbar?.likeCountLiked || '', time: v.properties.publishedTime || '',
+          replies: v.toolbar?.replyCount || ''
+        });
+      } else if (k === 'commentRenderer' && v?.commentId) {
+        byId.set(v.commentId, {
+          id: v.commentId, text: text(v.contentText), author: text(v.authorText),
+          likes: text(v.voteCount), time: text(v.publishedTimeText), replies: v.replyCount || ''
+        });
+        order.push(v.commentId);
+      } else if (k === 'commentViewModel' && v?.commentId) {
+        order.push(v.commentId);
+      }
+    });
+    const ids = order.length ? [...new Set(order)] : [...byId.keys()];
+    const items = ids.map(id => byId.get(id)).filter(c => c && c.text);
+    // 次ページ：返ってきた一覧の最後にある continuationItemRenderer（返信の続きは使わない）
+    let token = null;
+    walk(json, (k, v) => {
+      if ((k === 'appendContinuationItemsAction' || k === 'reloadContinuationItemsCommand') && Array.isArray(v?.continuationItems)) {
+        const last = v.continuationItems[v.continuationItems.length - 1];
+        if (last?.continuationItemRenderer) walk(last, (kk, vv) => { if (kk === 'continuationCommand' && vv?.token) token = vv.token; });
+      }
+    });
+    return { items, token };
+  }
+
+  // 動画のコメント（最初のページ）。sort: 'top'（評価順）| 'new'（新しい順）
+  async function comments(videoId, signal, sort = 'top') {
+    const cfg = await getCfg();
+    const json = await innertube('next', { videoId }, cfg, signal);
+    let token = null;
+    walk(json, (k, v) => {
+      if (token || k !== 'itemSectionRenderer' || !/comment/i.test(v?.sectionIdentifier || '')) return;
+      walk(v, (kk, vv) => { if (!token && kk === 'continuationCommand' && vv?.token) token = vv.token; });
+    });
+    if (!token) return { items: [], token: null, disabled: true };
+    let first = await innertube('next', { continuation: token }, cfg, signal);
+    if (sort === 'new') {
+      // 並び替えメニューの「新しい順」の目印で取り直す
+      let newTok = null;
+      walkPath(first, (k, v, stack) => {
+        if (newTok || k !== 'continuationCommand' || !v?.token) return;
+        for (let i = stack.length - 1; i >= Math.max(0, stack.length - 6); i--) {
+          const t = text(stack[i]?.title);
+          if (t) { if (/newest|新しい/i.test(t)) newTok = v.token; break; }
+        }
+      });
+      if (newTok) first = await innertube('next', { continuation: newTok }, cfg, signal);
+    }
+    return parseComments(first);
+  }
+
+  async function commentsMore(token, signal) {
+    return parseComments(await innertube('next', { continuation: token }, await getCfg(), signal));
+  }
+
+  // ---------- YouTubeの視聴履歴（スマホ・テレビなど他の端末の分も含む） ----------
+  const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  const WDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  // 見出し（Today / Yesterday / Monday / Oct 20 / Oct 20, 2025 / 今日 / 10月20日…）→ その日の0時
+  function parseDay(title) {
+    const t = (title || '').trim().toLowerCase();
+    const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+    const ago = n => d0.getTime() - n * 864e5;
+    if (/^(today|今日)$/.test(t)) return ago(0);
+    if (/^(yesterday|昨日)$/.test(t)) return ago(1);
+    const wd = WDAYS.indexOf(t.replace(/s$/, ''));
+    const jwd = '日月火水木金土'.indexOf((t.match(/^(.)曜日?$/) || [])[1]);
+    const w = wd >= 0 ? wd : jwd;
+    if (w >= 0) { let n = (d0.getDay() - w + 7) % 7; if (n === 0) n = 7; return ago(n); }
+    let m = t.match(/^([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?$/);
+    let y, mo, d;
+    if (m && m[1] in MONTHS) { mo = MONTHS[m[1]]; d = +m[2]; y = m[3] ? +m[3] : null; }
+    m = !mo && mo !== 0 ? t.match(/^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日/) : null;
+    if (m) { y = m[1] ? +m[1] : null; mo = +m[2] - 1; d = +m[3]; }
+    if (mo == null) return null;
+    let dt = new Date(y || d0.getFullYear(), mo, d).getTime();
+    if (!y && dt > d0.getTime()) dt = new Date(d0.getFullYear() - 1, mo, d).getTime();
+    return dt;
+  }
+
+  async function watchHistory({ maxPages = 10, stopBefore = 0 } = {}, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    let token = null, out = [], lastDay = null;
+    for (let page = 0; page < maxPages; page++) {
+      const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId: 'FEhistory' }, cfg, signal);
+      walk(json, (k, v) => {
+        if (k !== 'itemSectionRenderer' || !v) return;
+        let title = '';
+        walk(v.header || {}, (kk, vv) => { if (!title && (kk === 'title' || kk === 'text')) title = text(vv); });
+        if (!title) walk(v.contents || [], (kk, vv) => { if (!title && kk === 'itemSectionHeaderRenderer') title = text(vv.title); });
+        const day = parseDay(title) ?? lastDay; // 見出しの無い続きのページは前の日付のまま
+        if (day != null) lastDay = day;
+        for (const x of parseTab({ contents: v.contents })) out.push({ ...x, day });
+      });
+      token = lastToken(json);
+      if (!token || (stopBefore && lastDay != null && lastDay < stopBefore)) break;
+    }
+    const seen = new Set();
+    return out.filter(x => x.v && !seen.has(x.v) && seen.add(x.v));
+  }
+
+  async function channelTab(id, tab, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' }; // 「◯日前」を確実に読めるよう英語で取得
+    const get = params => innertube('browse', { context, browseId: id, params }, cfg, signal);
+    let json = await get(TAB_PARAMS[tab]);
+    let tabs = findTabs(json);
+    if (!tabs.some(t => tabUrl(t))) return parseTab(json); // タブ情報が無い形式ならそのまま
+    const ok = t => tabUrl(t).endsWith(TAB_SUFFIX[tab]);
+    let sel = tabs.find(t => t.selected);
+    if (!sel || !ok(sel)) {
+      const want = tabs.find(ok);
+      if (!want) return []; // このチャンネルにはそのタブが無い（ライブ配信なし等）
+      const p = want.endpoint?.browseEndpoint?.params;
+      if (!p || p === TAB_PARAMS[tab]) return [];
+      TAB_PARAMS[tab] = p; // 正しい指定を覚えて取り直す
+      json = await get(p);
+      sel = findTabs(json).find(t => t.selected);
+      if (!sel || !ok(sel)) return [];
+    }
+    return parseTab(sel.content || sel);
+  }
+
+
+  // ---------- チャンネル登録・通知 ----------
+  let cfgCache = null;
+  async function getCfg() {
+    if (cfgCache?.INNERTUBE_CONTEXT) return cfgCache;
+    const cfg = {};
+    for (const s of document.scripts) {
+      const t = s.textContent;
+      if (t && t.includes('ytcfg.set({')) Object.assign(cfg, findCfg(t));
+    }
+    if (!cfg.INNERTUBE_CONTEXT) {
+      const html = await (await fetch('/feed/channels', { credentials: 'include' })).text();
+      Object.assign(cfg, findCfg(html));
+    }
+    cfgCache = cfg;
+    return cfg;
+  }
+
+  async function call(endpoint, body) {
+    const json = await innertube(endpoint, body, await getCfg());
+    if (json?.error) throw new Error(json.error.message || 'YouTube API エラー');
+    return json;
+  }
+
+  // チャンネルページから通知設定の選択肢を読む
+  async function channelSubInfo(key) {
+    const html = await (await fetch(TG.channelUrl(key), { credentials: 'include' })).text();
+    const data = findJson(html, 'ytInitialData = ') || findJson(html, 'ytInitialData"] = ');
+    const opts = new Map();
+    let subscribed = null;
+    walkPath(data, (k, v, stack) => {
+      if (k === 'modifyChannelNotificationPreferenceEndpoint' && v?.params) {
+        for (let i = stack.length - 1; i >= Math.max(0, stack.length - 9); i--) {
+          const o = stack[i];
+          if (Array.isArray(o)) continue;
+          const t = text(o.text) || text(o.title);
+          if (t) {
+            const sel = !!(o.isSelected ?? o.selected);
+            if (!opts.has(t)) opts.set(t, { label: t, params: v.params, selected: sel });
+            else if (sel) opts.get(t).selected = true;
+            break;
+          }
+        }
+      }
+      if (subscribed === null && (k === 'subscribed' || k === 'isSubscribed') && typeof v === 'boolean') subscribed = v;
+    });
+    return { options: [...opts.values()], subscribed };
+  }
+
+  async function setSubscribed(id, on) {
+    await call(on ? 'subscription/subscribe' : 'subscription/unsubscribe', {
+      channelIds: [id],
+      params: on ? 'EgIIAhgA' : 'CgIIAhgA'
+    });
+  }
+
+  async function setNotification(params) {
+    await call('notification/modify_channel_preference', { params });
+  }
+
+  // 動画ID → チャンネル（oEmbedで取れない埋め込み禁止の動画などに使う）
+  async function videoOwner(videoId) {
+    const j = await call('player', { videoId });
+    const d = j?.videoDetails;
+    return d?.channelId ? { k: 'channel/' + d.channelId, n: d.author || '' } : null;
+  }
+
+  // YouTube本体の「後で見る」再生リスト（最大 maxPages×100本）
+  async function watchLater({ maxPages = 10 } = {}, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const out = [];
+    let token = null;
+    for (let i = 0; i < maxPages; i++) {
+      const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId: 'VLWL' }, cfg, signal);
+      out.push(...parseTab(json));
+      token = lastToken(json);
+      if (!token) break;
+    }
+    const seen = new Set();
+    return out.filter(x => x.v && !seen.has(x.v) && seen.add(x.v));
+  }
+
+  // YouTube本体の「後で見る」から削除
+  async function removeFromWatchLater(videoId) {
+    const j = await call('browse/edit_playlist', { playlistId: 'WL', actions: [{ action: 'ACTION_REMOVE_VIDEO_BY_VIDEO_ID', removedVideoId: videoId }] });
+    if (j?.status && j.status !== 'STATUS_SUCCEEDED') throw new Error(j.status);
+    return true;
+  }
+
+  return { removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
+})();
