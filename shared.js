@@ -78,11 +78,106 @@ const TG = {
   },
   kwList: s => String(s || '').split(/[,、，\n]/).map(x => x.trim()).filter(Boolean),
 
+  // フォルダ名に含まれる言葉ごとの初期キーワード
+  KW_DICT: {
+    '食': ['グルメ', '飯', 'めし', 'ランチ', 'ディナー', 'ラーメン', '寿司', '焼肉', '大食い', '爆食', '料理', 'レシピ', '食レポ', '食べ', 'うどん', 'カレー', '定食', 'mukbang', 'food', 'cooking'],
+    'グルメ': ['グルメ', '飯', 'ランチ', 'ラーメン', '寿司', '焼肉', '食べ', '食レポ', '料理', 'cooking', 'food'],
+    '大食': ['大食い', '爆食', 'デカ盛り', '完食', 'mukbang'],
+    '食レポ': ['食レポ', 'グルメ', '食べ歩き', '名店', '老舗'],
+    'ゲーム': ['ゲーム', '実況', 'プレイ', '攻略', 'switch', 'ps5', 'steam', 'マイクラ', 'マインクラフト', 'ポケモン', 'gaming', 'game'],
+    'レトロ': ['レトロ', 'ファミコン', 'スーファミ', 'メガドライブ', '昭和', '平成'],
+    'ゲームセンター': ['ゲーセン', 'クレーンゲーム', 'ufoキャッチャー', 'メダルゲーム'],
+    '音楽': ['歌', 'mv', 'cover', 'カバー', '歌ってみた', '弾いてみた', 'ピアノ', 'ギター', 'ライブ', 'music', 'official'],
+    'アイドル': ['アイドル', 'idol', 'ダンス', 'dance', '推し'],
+    'アニメ': ['アニメ', 'anime', '声優', '漫画', 'マンガ', 'まんが', 'pv'],
+    '心霊': ['心霊', '怖い', 'ホラー', '怪談', '廃墟', '都市伝説', 'ミステリー', '事故物件', 'オカルト', '呪'],
+    '怪談': ['怪談', '怖い話', '実話'],
+    '海外': ['海外', '外国人', '反応', '移住', '在住', '留学', 'アメリカ', '韓国', '中国', '台湾'],
+    '韓国': ['韓国', 'korea', 'ソウル', '釜山', '한국'],
+    '中国': ['中国', 'china', '中国人', '上海', '北京'],
+    'アメリカ': ['アメリカ', 'usa', 'america', 'ニューヨーク', 'ハワイ', 'ロサンゼルス'],
+    '国内': ['旅行', '観光', '日本', '温泉', '散歩', '街歩き'],
+    '沖縄': ['沖縄', '那覇', '石垣', '宮古'],
+    '函館': ['函館', '北斗', '五稜郭', '道南'],
+    '札幌': ['札幌', 'すすきの', '北海道'],
+    'ガジェット': ['ガジェット', 'レビュー', '開封', 'スマホ', 'iphone', 'pixel', 'android', 'pc', '自作', 'キーボード', 'カメラ'],
+    'vlog': ['vlog', '日常', 'ルーティン', '暮らし'],
+    'キャンプ': ['キャンプ', 'ソロキャン', '車中泊', 'アウトドア', '焚き火', '登山'],
+    'お笑い': ['お笑い', '芸人', 'コント', '漫才', 'ドッキリ', '爆笑'],
+    'スポーツ': ['スポーツ', 'サッカー', '野球', '陸上', 'バスケ', '格闘', '試合'],
+    'ダンス': ['ダンス', 'dance', '踊って'],
+    'モデル': ['モデル', 'グラビア', '撮影', 'ファッション']
+  },
+  defaultKw(name) {
+    const n = (name || '').toLowerCase();
+    const out = n.split(/[・\/／,、\s]+/).filter(x => x.length >= 2);
+    for (const [k, v] of Object.entries(TG.KW_DICT)) if (n.includes(k.toLowerCase())) out.push(...v);
+    return [...new Set(out.map(x => x.toLowerCase()))];
+  },
+  // フォルダの振り分け補助キーワード（未設定ならフォルダ名から自動。「-言葉」は除外語）
+  folderKw(f) { const src = f.kw?.length ? f.kw : TG.defaultKw(f.name); return { inc: src.filter(x => !/^[-－ー]/.test(x.trim())).map(x => x.trim()).filter(Boolean), exc: src.filter(x => /^[-－ー]/.test(x.trim())).map(x => x.trim().slice(1)).filter(Boolean) }; },
+
+  // 「お気に入り以外を検索」の検索語：自由入力＋フォルダのキーワード（いずれか）＋除外語
+  searchQuery(folders, fid, text) {
+    const f = folders.find(x => x.id === fid);
+    const parts = [];
+    if (text) parts.push(text.trim());
+    if (f) {
+      const { inc, exc } = TG.folderKw(f);
+      const words = [...new Set([f.name, ...inc])].filter(Boolean).slice(0, 6);
+      if (words.length) parts.push(words.map(w => (/\s/.test(w) ? `"${w}"` : w)).join(' | '));
+      exc.slice(0, 5).forEach(w => parts.push('-' + w));
+    }
+    return parts.join(' ').trim();
+  },
+
+  // ---------- 集中モード（曜日・時間帯でフォルダを見えなくする） ----------
+  //   focus: { on, slots:[{ days:[0-6], from, to }], type:'lock'|'allow', lock:[フォルダID], allow:[フォルダID],
+  //            hideHome, blockWatch, unlockMin, unlockUntil }
+  //   type … lock＝選んだフォルダを見えなくする ／ allow＝選んだフォルダだけ見られる（ほかは全部見えなくする）
+  FOCUS_DEF: { on: false, slots: [{ days: [1, 2, 3, 4, 5], from: '09:00', to: '18:00' }], type: 'lock', lock: [], allow: [], hideHome: true, blockWatch: true, unlockMin: 15, unlockUntil: 0 },
+  async focusCfg() {
+    const { focus } = await chrome.storage.local.get('focus');
+    return { ...structuredClone(TG.FOCUS_DEF), ...(focus || {}) };
+  },
+  // いま集中モードか。戻り値 { active, until（終わる時刻）, slot, unlocked（一時解除中） }
+  focusState(F, t = Date.now()) {
+    if (!F?.on) return { active: false };
+    const d = new Date(t);
+    for (const s of F.slots || []) {
+      const [fh, fm] = String(s.from || '0:0').split(':').map(Number);
+      const [th, tm] = String(s.to || '0:0').split(':').map(Number);
+      const a = (fh || 0) * 60 + (fm || 0), b = (th || 0) * 60 + (tm || 0), x = d.getHours() * 60 + d.getMinutes();
+      // 日をまたぐ時間帯（22:00〜6:00）は、始まった日の曜日で判定
+      const inToday = a <= b ? x >= a && x < b : x >= a;
+      const inYesterday = a > b && x < b;
+      const day = inYesterday ? (d.getDay() + 6) % 7 : d.getDay();
+      if ((inToday || inYesterday) && (s.days || []).includes(day)) {
+        const end = new Date(t); end.setHours(th || 0, tm || 0, 0, 0);
+        if (end.getTime() <= t) end.setDate(end.getDate() + 1);
+        const unlocked = (F.unlockUntil || 0) > t;
+        return { active: !unlocked, unlocked, until: end.getTime(), slot: s };
+      }
+    }
+    return { active: false };
+  },
+  // フォルダが見えない状態か（トップのフォルダで判定）
+  folderLocked(F, folders, id) {
+    const root = TG.rootOf(folders, id)?.id || id;
+    if (id === '__unsorted') return F.type === 'allow' && !(F.allow || []).includes('__unsorted');
+    return F.type === 'allow' ? !(F.allow || []).includes(root) : (F.lock || []).includes(root);
+  },
+  // チャンネルが見えない状態か（fs＝そのチャンネルが入っているフォルダ、null＝登録外・不明）
+  channelLocked(F, folders, fs) {
+    if (F.type === 'allow') return !(fs?.length ? fs.some(f => !TG.folderLocked(F, folders, f.id)) : (F.allow || []).includes('__unsorted') && fs);
+    return !!fs?.length && fs.some(f => TG.folderLocked(F, folders, f.id));
+  },
+
   COLORS: ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#1e88e5', '#8e24aa', '#ec407a', '#6d4c41', '#757575'],
 
   async load() {
-    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind, newOff } =
-      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind', 'newOff']);
+    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind, newOff, recMode, sFolder, sText } =
+      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind', 'newOff', 'recMode', 'sFolder', 'sText']);
     if (!folders && Array.isArray(groups)) {
       channels = {};
       folders = groups.map(g => {
@@ -106,6 +201,7 @@ const TG = {
       homeShortCols: homeShortCols === null ? null : homeShortCols >= 3 && homeShortCols <= 7 ? homeShortCols : 5,
       hideWatched: !!hideWatched,
       recKind: recKind === 'short' ? 'short' : 'video',
+      recMode: recMode === 'search' ? 'search' : 'rec', sFolder: sFolder || '', sText: sText || '',
       newOff: Array.isArray(newOff) ? newOff : [] // 新着動画で隠すカテゴリ（トップのフォルダID / '__unsorted'）
     };
   },
@@ -117,7 +213,7 @@ const TG = {
   AUX: {
     history: ['history', 'daily', 'watched', 'ytHistSeen'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
     later: ['later', 'laterRemoved'],                      // 後で見る（外した記録も）
-    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'notifyRules', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
+    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'notifyRules', 'focus', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
   },
 
   // opts: { meta, history, later, prefs }（省略時はすべて含める）

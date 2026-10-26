@@ -680,5 +680,14 @@ const YTAPI = (() => {
     return { ids, token: next };
   }
 
-  return { shortsSequence, removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
+  // YouTube検索（1ページ分）。token を渡すと続き
+  async function search(query, token, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const json = await innertube('search', token ? { context, continuation: token } : { context, query }, cfg, signal);
+    return { items: parseTab(json), token: lastToken(json) };
+  }
+
+  return { search, shortsSequence, removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
 })();

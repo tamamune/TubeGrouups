@@ -54,8 +54,95 @@
   setTimeout(saveYtTheme, 3000);
   new MutationObserver(saveYtTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['dark'] });
 
+  // ---------- 集中モード ----------
+  let FOCUS = TG.FOCUS_DEF, FST = { active: false }, focusSig = '';
+  const fLocked = id => FST.active && TG.folderLocked(FOCUS, S.folders, id);
+  function applyFocus() {
+    FST = TG.focusState(FOCUS);
+    const fm = TG.folderMap(S.channels, S.folders);
+    const chLocked = (key, id) => {
+      const fs = fm.get(key) || (id && fm.get('channel/' + id));
+      const known = fs || (S.channels[key] || (id && S.channels['channel/' + id]) ? [] : null);
+      return TG.channelLocked(FOCUS, S.folders, known);
+    };
+    TGFeed.setFocus({ active: FST.active, until: FST.until, folderLocked: id => TG.folderLocked(FOCUS, S.folders, id), channelLocked: chLocked });
+    const sig = JSON.stringify([FST.active, FOCUS]);
+    const changed = sig !== focusSig;
+    focusSig = sig;
+    document.documentElement.classList.toggle('tg-focus-on', FST.active);
+    return changed;
+  }
+  async function loadFocus() { FOCUS = await TG.focusCfg(); }
+  // 1分ごとに時間帯の出入りを確認
+  setInterval(() => {
+    if (document.hidden) return;
+    if (applyFocus()) { bumpMark(); renderGuide(true); renderSubsPage(true); markVideos(); checkWatchLock(); }
+  }, 30000);
+
+  // 一時解除（10秒待ってから）
+  async function askUnlock() {
+    if (document.getElementById('tg-unlock')) return;
+    const d = document.createElement('div');
+    d.id = 'tg-unlock';
+    const min = FOCUS.unlockMin || 15;
+    d.innerHTML = `<div class="tg-ul-box"><div class="tg-ul-t">🔒 集中モードを ${min} 分だけ解除しますか？</div>
+      <p>本当に今見る必要がありますか？ 10秒待つと解除できます。</p>
+      <div class="tg-ul-btns"><button class="tg-ul-no">やめる（集中を続ける）</button><button class="tg-ul-yes" disabled>10</button></div></div>`;
+    document.body.appendChild(d);
+    const yes = d.querySelector('.tg-ul-yes');
+    let n = 10;
+    const t = setInterval(() => { n--; yes.textContent = n > 0 ? String(n) : `${min}分だけ解除`; if (n <= 0) { clearInterval(t); yes.disabled = false; } }, 1000);
+    d.querySelector('.tg-ul-no').onclick = () => { clearInterval(t); d.remove(); };
+    yes.onclick = async () => {
+      d.remove();
+      const F = await TG.focusCfg();
+      F.unlockUntil = Date.now() + min * 60e3;
+      await chrome.storage.local.set({ focus: F });
+      TG.log('集中モード', `${min}分だけ解除`);
+    };
+  }
+  document.addEventListener('click', e => {
+    const u = e.target.closest?.('[data-tg-unlock]');
+    if (u) { e.preventDefault(); e.stopPropagation(); askUnlock(); return; }
+    const c = e.target.closest?.('[data-tg-focuscfg]');
+    if (c) { e.preventDefault(); e.stopPropagation(); TGManager.open('focus'); }
+  }, true);
+
+  // 再生ページ：見えないチャンネルの動画ならロック画面
+  function checkWatchLock() {
+    let ov = document.getElementById('tg-watchlock');
+    const id = isWatchPage() ? new URLSearchParams(location.search).get('v') : isShortsPage() ? location.pathname.split('/')[2] : null;
+    let lock = false, why = '';
+    if (id && FST.active && FOCUS.blockWatch) {
+      const ch = currentChannel();
+      if (ch) {
+        const fs = fMap.get(ch.key) || (ch.id && fMap.get('channel/' + ch.id));
+        const known = fs || (favSet.has(ch.key) ? [] : null);
+        lock = TG.channelLocked(FOCUS, S.folders, known);
+        why = fs?.length ? fs.map(f => f.name).join('・') : known ? '未分類' : '登録していないチャンネル';
+      }
+    }
+    if (!lock) { ov?.remove(); return; }
+    document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch { /* なし */ } });
+    if (ov && ov.dataset.v === id) return;
+    ov?.remove();
+    ov = document.createElement('div');
+    ov.id = 'tg-watchlock';
+    ov.dataset.v = id;
+    const until = FST.until ? new Date(FST.until).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '';
+    ov.innerHTML = `<div class="tg-ul-box"><div class="tg-lock-ic">🔒</div><div class="tg-ul-t">集中モード中です</div>
+      <p>「${esc(why)}」の動画は ${until ? until + ' まで' : '今は'} 見られません。</p>
+      <div class="tg-ul-btns"><button class="tg-ul-no" data-back="1">前のページに戻る</button><button data-tg-unlock="1">少しだけ解除する…</button></div></div>`;
+    ov.querySelector('[data-back]').onclick = () => (history.length > 1 ? history.back() : location.assign('/'));
+    document.body.appendChild(ov);
+  }
+  // 解除までの間、勝手に再生されないように
+  document.addEventListener('play', e => { if (document.getElementById('tg-watchlock') && e.target.tagName === 'VIDEO') e.target.pause(); }, true);
+
   async function reload() {
     S = await TG.load();
+    await loadFocus();
+    applyFocus();
     if (S.activeGroup && S.activeGroup !== '__unsorted' && !S.folders.some(f => f.id === S.activeGroup)) S.activeGroup = null;
     buildFavSet();
     applyHomeCols();
@@ -63,6 +150,7 @@
     renderSubsPage(true);
     renderFab();
     markVideos();
+    checkWatchLock();
     countsSig = '';
     refreshCounts();
   }
@@ -86,7 +174,7 @@
     if (sec.parentElement !== sections || sec.nextElementSibling !== subs) sections.insertBefore(sec, subs);
 
     const onSubs = isSubsFeed();
-    const sig = JSON.stringify([onSubs, S.activeGroup, S.feedType, S.folders.map(f => [f.id, f.name, f.color, f.parent, f.collapsed]), [...NC], laterN]);
+    const sig = JSON.stringify([focusSig, onSubs, S.activeGroup, S.feedType, S.folders.map(f => [f.id, f.name, f.color, f.parent, f.collapsed]), [...NC], laterN]);
     if (!force && sec.dataset.sig === sig) return;
     sec.dataset.sig = sig;
 
@@ -101,9 +189,10 @@
       if (hidden) continue;
       const kids = TG.hasChildren(S.folders, f.id);
       const caret = kids ? `<span class="tg-g-caret ${f.collapsed ? '' : 'open'}" data-caret="${esc(f.id)}">${IC.caret}</span>` : '';
-      h += item(`data-f="${esc(f.id)}" title="${esc(TG.pathName(S.folders, f))}"`,
-        `<span class="tg-g-ic" style="color:${esc(f.color)}">${IC.folder}</span>`, f.name,
-        onSubs && S.activeGroup === f.id, badge(NC.get(f.id)) + caret, 12 + depth * 16);
+      const lk = fLocked(f.id);
+      h += item(`data-f="${esc(f.id)}" title="${esc(TG.pathName(S.folders, f))}${lk ? '（集中モード中）' : ''}"${lk ? ' data-locked="1"' : ''}`,
+        `<span class="tg-g-ic" style="color:${esc(f.color)}">${lk ? '🔒' : IC.folder}</span>`, f.name,
+        onSubs && S.activeGroup === f.id, (lk ? '' : badge(NC.get(f.id))) + caret, 12 + depth * 16);
     }
     h += item('data-f="__unsorted"', `<span class="tg-g-ic">${IC.folder}</span>`, '未分類', onSubs && S.activeGroup === '__unsorted', badge(NC.get('__unsorted')));
     h += item('data-act="manage"', IC.gear, 'フォルダ設定', false);
@@ -163,7 +252,24 @@
     let bar = document.getElementById('tg-bar');
     let spacer = document.getElementById('tg-bar-spacer');
     let feed = document.getElementById('tg-feed');
-    if (!bar) { bar = document.createElement('div'); bar.id = 'tg-bar'; bar.addEventListener('click', onBarClick); rebuild = true; }
+    if (!bar) {
+      bar = document.createElement('div'); bar.id = 'tg-bar'; bar.addEventListener('click', onBarClick); rebuild = true;
+      let qT = null;
+      bar.addEventListener('input', e => {
+        if (!e.target.classList.contains('tg-q')) return;
+        qText = e.target.value;
+        e.target.closest('.tg-qbox')?.classList.toggle('tg-has', !!qText);
+        clearTimeout(qT);
+        qT = setTimeout(() => TGFeed.setQuery(qText), 200);
+      });
+      // 入力中はYouTubeのショートカット（k・j・/ など）を効かせない
+      ['keydown', 'keyup', 'keypress'].forEach(t => bar.addEventListener(t, e => {
+        if (e.target.tagName !== 'INPUT') return;
+        e.stopPropagation();
+        if (e.target.classList.contains('tg-sq')) { if (t === 'keydown' && e.key === 'Enter') bar.querySelector('[data-dosearch]')?.click(); return; }
+        if (t === 'keydown' && e.key === 'Escape') { e.target.value = qText = ''; TGFeed.setQuery(''); }
+      }));
+    }
     if (!spacer) { spacer = document.createElement('div'); spacer.id = 'tg-bar-spacer'; }
     if (!feed) { feed = document.createElement('div'); feed.id = 'tg-feed'; rebuild = true; }
     if (bar.parentElement !== primary || primary.firstElementChild !== bar) primary.prepend(bar);
@@ -239,7 +345,13 @@
     });
   }, { passive: true });
 
+  let qText = '', qKey = '';
   function buildBar(bar) {
+    // 表示の種類・フォルダが変わったら絞り込みを解除
+    const key = S.feedType + '|' + (S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new' ? '' : S.activeGroup);
+    if (key !== qKey) { qKey = key; if (qText) { qText = ''; TGFeed.setQuery(''); } }
+    const act = document.activeElement;
+    const keepFocus = act?.classList?.contains('tg-q') && bar.contains(act) ? [act.selectionStart, act.selectionEnd] : null;
     const chip = (attrs, label, on, n, color) =>
       `<button class="tg-chip ${on ? 'tg-active' : ''}" ${attrs}>${color ? `<i class="tg-cdot" style="background:${esc(color)}"></i>` : ''}<span class="tg-clabel">${esc(label)}</span>${badge(n)}</button>`;
     const tops = S.folders.filter(f => !f.parent || !S.folders.some(x => x.id === f.parent));
@@ -252,13 +364,16 @@
     const play = S.feedType === 'video' || S.feedType === 'live' || S.feedType === 'later' || S.feedType === 'new'
       ? '<button class="tg-chip tg-play" data-play="1" title="表示中の未視聴の動画を、新しい順に続けて再生">▶ 連続再生</button>' : '';
     const hidew = `<button class="tg-chip tg-ghost ${S.hideWatched ? 'tg-active' : ''}" data-hidew="1" title="90%以上見た動画を一覧から隠す">${S.hideWatched ? '視聴済みを表示' : '視聴済みを隠す'}</button>`;
-    const tools = `<div class="tg-seg">${types}</div><div class="tg-seg" title="列の数"><span class="tg-seg-lb">列</span>${cols}</div>`;
+    const fName = S.activeGroup === '__unsorted' ? '未分類' : S.folders.find(f => f.id === S.activeGroup)?.name;
+    const ph = S.feedType === 'new' ? '新着から検索' : S.feedType === 'later' ? '後で見るから検索' : S.feedType === 'rec' ? 'おすすめから検索' : fName ? `「${fName}」内を検索` : '一覧から検索';
+    const qbox = `<label class="tg-qbox ${qText ? 'tg-has' : ''}" title="表示中の一覧をタイトル・チャンネル名で絞り込み（スペースで区切ると全部を含むもの）"><span>🔍</span><input class="tg-q" type="search" placeholder="${esc(ph)}" value="${esc(qText)}"></label>`;
+    const tools = `<div class="tg-seg">${types}</div><div class="tg-seg" title="列の数"><span class="tg-seg-lb">列</span>${cols}</div>${qbox}`;
 
     // 2段目：フォルダ（横幅いっぱいに折り返し）
     let folders = chip('data-g=""', 'すべて', !S.activeGroup, NC.get('__all'));
     folders += chip('data-g="__unsorted"', '未分類', S.activeGroup === '__unsorted', NC.get('__unsorted'));
     folders += '<span class="tg-sep"></span>';
-    tops.forEach(f => { folders += chip(`data-g="${esc(f.id)}"`, f.name, root?.id === f.id, NC.get(f.id), f.color); });
+    tops.forEach(f => { folders += fLocked(f.id) ? chip(`data-g="${esc(f.id)}" data-locked="1" title="集中モード中"`, '🔒 ' + f.name, root?.id === f.id, 0, f.color) : chip(`data-g="${esc(f.id)}"`, f.name, root?.id === f.id, NC.get(f.id), f.color); });
 
     // 3段目：選択中のフォルダの中のフォルダ
     let sub = '';
@@ -279,10 +394,29 @@
         ${sub ? `<div class="tg-chips tg-sub"><span class="tg-sub-lb">${esc(root.name)} の中</span>${sub}</div>` : ''}`;
     // おすすめ・後で見る：1段目は動画と同じ並び、2段目にその画面の操作
     if (S.feedType === 'rec') {
-      row2 = `<div class="tg-chips tg-folders"><span class="tg-bar-title">${IC.rec}おすすめ<small>（未登録チャンネルのみ）</small></span>
-        <div class="tg-seg" title="おすすめの種類">${seg('data-reckind', 'video', '動画', S.recKind !== 'short')}${seg('data-reckind', 'short', 'ショート', S.recKind === 'short')}</div>
-        <button class="tg-chip tg-ghost" data-reload="1">更新</button></div>`;
-      cur = null; curName = 'おすすめ'; totalNew = 0;
+      const srch = S.recMode === 'search';
+      const kindSeg = `<div class="tg-seg" title="動画／ショート">${seg('data-reckind', 'video', '動画', S.recKind !== 'short')}${seg('data-reckind', 'short', 'ショート', S.recKind === 'short')}</div>`;
+      const modeSeg = `<div class="tg-seg">${seg('data-recmode', 'rec', `${IC.rec}おすすめ`, !srch)}${seg('data-recmode', 'search', '🔍 お気に入り以外を検索', srch)}</div>`;
+      row2 = `<div class="tg-chips tg-folders">${modeSeg}${kindSeg}<span class="tg-sub-lb">${srch ? '登録していないチャンネルから探す' : '未登録チャンネルのみ'}</span>
+        ${srch ? '' : '<button class="tg-chip tg-ghost" data-reload="1">更新</button>'}</div>`;
+      if (srch) {
+        const sRoot = S.sFolder ? TG.rootOf(S.folders, S.sFolder) : null;
+        let fchips = chip('data-sf=""', '指定なし', !S.sFolder) + tops.map(f => chip(`data-sf="${esc(f.id)}"`, f.name, sRoot?.id === f.id, 0, f.color)).join('');
+        let subs = '';
+        if (sRoot && TG.hasChildren(S.folders, sRoot.id)) {
+          const inRoot = TG.subtreeIds(S.folders, sRoot.id);
+          subs = chip(`data-sf="${esc(sRoot.id)}"`, `${sRoot.name}（全体）`, S.sFolder === sRoot.id, 0, sRoot.color) +
+            S.folders.filter(f => f.id !== sRoot.id && inRoot.has(f.id)).map(f => chip(`data-sf="${esc(f.id)}"`, '› ' + f.name, S.sFolder === f.id, 0, f.color)).join('');
+        }
+        const q = TG.searchQuery(S.folders, S.sFolder, S.sText);
+        row2 += `<div class="tg-chips tg-sub tg-search">
+          <label class="tg-qbox tg-sbox"><span>🔍</span><input class="tg-sq" type="search" placeholder="キーワード（空ならフォルダのタグで探す）" value="${esc(S.sText)}"></label>
+          <button class="tg-chip tg-play" data-dosearch="1">検索</button>
+          <span class="tg-sub-lb">フォルダ：</span>${fchips}
+          ${subs ? `<div class="tg-chips tg-sub2">${subs}</div>` : ''}
+          <div class="tg-sq-hint">${q ? `検索語：<code>${esc(q)}</code>　（フォルダ名＋振り分け補助のキーワード🏷。🏷は「フォルダ設定」で編集）` : 'キーワードを入れるか、フォルダを選んでください'}</div></div>`;
+      }
+      cur = null; curName = srch ? '検索' : 'おすすめ'; totalNew = 0;
     } else if (S.feedType === 'new') {
       const off = new Set(S.newOff);
       const cat = (id, name, color, n) => `<button class="tg-chip tg-cat ${off.has(id) ? '' : 'tg-active'}" data-ncat="${esc(id)}" title="${off.has(id) ? '押すと表示' : '押すと隠す'}">${color ? `<i class="tg-cdot" style="background:${esc(color)}"></i>` : ''}<span class="tg-clabel">${esc(name)}</span>${badge(n)}</button>`;
@@ -297,13 +431,18 @@
       cur = null; curName = '後で見る'; totalNew = 0;
     }
     bar.className = 'tg-bar-full' + (folded ? ' tg-folded' : '');
-    bar.innerHTML = `<div class="tg-bar-tools">${tools}<span class="tg-grow"></span>${play}${hidew}
-        <button class="tg-chip tg-ghost" data-manage="1">${IC.gear}フォルダ設定</button></div>
+    const focusChip = FST.active ? `<button class="tg-chip tg-focus" data-tg-focuscfg="1" title="集中モードの設定">🎯 集中モード中${FST.until ? '（〜' + new Date(FST.until).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) + '）' : ''}</button>`
+      : FST.unlocked ? `<button class="tg-chip tg-ghost" data-tg-focuscfg="1">🎯 一時解除中（〜${new Date(FOCUS.unlockUntil).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}）</button>` : '';
+    const discover = (S.feedType === 'video' || S.feedType === 'live' || S.feedType === 'short') && S.activeGroup && S.activeGroup !== '__unsorted'
+      ? '<button class="tg-chip tg-ghost" data-discover="1" title="このフォルダのキーワードで、登録していないチャンネルの動画を探す">🔍 お気に入り以外を探す</button>' : '';
+    bar.innerHTML = `<div class="tg-bar-tools">${tools}<span class="tg-grow"></span>${focusChip}${discover}${play}${hidew}
+        <button class="tg-chip tg-ghost tg-icon" data-manage="1" title="フォルダ設定">${IC.gear}</button></div>
       <div class="tg-fold"><div class="tg-fold-in">
         ${row2}
       </div></div>
       <button class="tg-index" data-fold="1" aria-expanded="${!folded}" title="フォルダの表示／非表示">
         ${cur?.color ? `<i class="tg-cdot" style="background:${esc(cur.color)}"></i>` : '📁'}<span>${esc(curName)}</span>${badge(totalNew)}<b class="tg-caret">▾</b></button>`;
+    if (keepFocus) { const i = bar.querySelector('.tg-q'); i?.focus(); try { i?.setSelectionRange(...keepFocus); } catch { /* なし */ } }
   }
 
   // 連続再生：表示中の未視聴＋（フォルダ表示なら）そのフォルダの直近の新着、新しい順
@@ -341,6 +480,22 @@
     if (b.dataset.manage) return TGManager.open();
     if (b.dataset.fold) { manualUntil = performance.now() + 700; setFolded(!folded); return; }
     if (b.dataset.reload) return TGFeed.refresh(S, { force: true });
+    if (b.dataset.recmode || b.dataset.discover || 'sf' in b.dataset || b.dataset.dosearch) {
+      const patch = {};
+      if (b.dataset.recmode) patch.recMode = b.dataset.recmode;
+      if (b.dataset.discover) {
+        Object.assign(patch, { recMode: 'search', sFolder: S.activeGroup, sText: '', feedType: 'rec', recKind: S.feedType === 'short' ? 'short' : 'video' });
+      }
+      if ('sf' in b.dataset) patch.sFolder = b.dataset.sf;
+      if (b.dataset.dosearch) patch.sText = document.querySelector('#tg-bar .tg-sq')?.value.trim() || '';
+      Object.assign(S, patch);
+      await chrome.storage.local.set(patch);
+      buildBar(document.getElementById('tg-bar'));
+      layoutBar();
+      window.scrollTo({ top: 0 });
+      if (!patch.feedType) TGFeed.refresh(S, { force: !!b.dataset.dosearch });
+      return;
+    }
     if (b.dataset.ncat || b.dataset.ncatall) {
       const tops = S.folders.filter(f => !f.parent || !S.folders.some(x => x.id === f.parent)).map(f => f.id).concat('__unsorted');
       let off = new Set(S.newOff);
@@ -629,6 +784,13 @@
       }
       if (val) frameTarget(item);
       if (val && item.querySelector(THUMB_SEL)) item.dataset.tgNeed += 'f';
+      // 集中モード：見えないチャンネルの動画はぼかして押せなくする
+      let lk = false;
+      if (FST.active && FOCUS.hideHome && (key || item.dataset.tgSig)) {
+        const fs = key && key !== '__other' ? fMap.get(key) : null;
+        lk = TG.channelLocked(FOCUS, S.folders, fs || (key && key !== '__other' && favSet.has(key) ? [] : null));
+      }
+      if (lk) item.dataset.tglock = '1'; else if (item.dataset.tglock) delete item.dataset.tglock;
       if (item.parentElement?.closest(ITEM_SEL)) continue; // 入れ子は外側だけ
       placeRow(item, key, links, byName, lvid, '');
     }
@@ -1027,6 +1189,10 @@
       S.homeShortCols = d.homeShortCols;
       applyHomeCols();
     }
+    if (changes.focus && !(changes.channels || changes.folders || changes.activeGroup || changes.feedType)) {
+      FOCUS = { ...TG.FOCUS_DEF, ...(changes.focus.newValue || {}) };
+      applyFocus(); bumpMark(); renderGuide(true); renderSubsPage(true); markVideos(); checkWatchLock();
+    }
     if (changes.channels || changes.folders || changes.activeGroup || changes.feedType) {
       reload().then(() => { if (document.getElementById('tg-pop')) buildPopover(); });
     } else if (changes.meta) {
@@ -1190,6 +1356,7 @@
     renderFab();
     markVideos();
     layoutHome();
+    if (FST.active && FOCUS.blockWatch) checkWatchLock();
   }
   let pendingWhileHidden = false;
   function schedule(delay = 500) {

@@ -366,3 +366,47 @@ html:not([dark]) .tg-toast { background: #fff; color: #0f0f0f; }
 .tg-t-x:hover { opacity: 1; }
 .tg-chip.tg-cat:not(.tg-active) { opacity: .5; }
 .tg-chip.tg-cat:not(.tg-active) .tg-clabel { text-decoration: line-through; }
+
+/* 絞り込み検索 */
+.tg-qbox { display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 10px; border-radius: 16px; background: var(--tg-chip); border: 1px solid var(--tg-line); min-width: 100px; flex: 0 1 170px; }
+.tg-qbox span { font-size: 13px; opacity: .7; }
+.tg-qbox input { flex: 1; min-width: 0; border: none; outline: none; background: transparent; color: var(--tg-fg); font: 13px Roboto, Arial, "Noto Sans JP", sans-serif; }
+.tg-qbox:focus-within { border-color: #3ea6ff; }
+#tg-feed .tg-card.tg-qhide { display: none; }
+
+/* お気に入り以外を検索 */
+.tg-chips.tg-search { align-items: center; }
+.tg-sbox { flex: 0 1 360px; }
+.tg-sub2 { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; }
+.tg-sq-hint { flex-basis: 100%; font-size: 12px; color: var(--tg-sub); }
+.tg-sq-hint code { font-family: inherit; color: var(--tg-fg); background: rgba(128,128,128,.2); padding: 1px 6px; border-radius: 4px; }
+.tg-seg-btn svg { width: 16px; height: 16px; fill: currentColor; vertical-align: -3px; margin-right: 3px; }
+
+/* ===== 集中モード ===== */
+[data-tglock] { position: relative; }
+[data-tglock] > * { filter: blur(14px) grayscale(.8); opacity: .35; pointer-events: none; user-select: none; }
+[data-tglock]::after { content: "🔒 集中モード中"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font: 700 15px Roboto, Arial, "Noto Sans JP", sans-serif; color: #fff; text-shadow: 0 1px 6px #000; background: rgba(0,0,0,.2); border-radius: 12px; z-index: 70; pointer-events: auto; cursor: not-allowed; }
+[data-tglock] [data-tglock] > *, [data-tglock] [data-tglock]::after { filter: none; opacity: 1; content: none; }
+.tg-chip.tg-focus { background: #6d4aff; color: #fff !important; border-color: #6d4aff; }
+.tg-chip[data-locked] { opacity: .55; }
+.tg-g-item[data-locked] { opacity: .55; }
+.tg-lockscreen { padding: 70px 20px !important; }
+.tg-lock-ic { font-size: 44px; margin-bottom: 6px; }
+.tg-lock-t { font-size: 20px; font-weight: 700; color: var(--tg-fg); margin-bottom: 6px; }
+.tg-lock-btns { display: flex; gap: 10px; justify-content: center; margin-top: 16px; }
+#tg-unlock, #tg-watchlock { position: fixed; inset: 0; z-index: 5000; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.72); backdrop-filter: blur(8px); font-family: Roboto, Arial, "Noto Sans JP", sans-serif; }
+#tg-watchlock { z-index: 2500; top: 56px; }
+.tg-ul-box { width: min(440px, calc(100vw - 40px)); padding: 26px; border-radius: 16px; background: #212121; color: #f1f1f1; text-align: center; box-shadow: 0 12px 40px rgba(0,0,0,.6); }
+html:not([dark]) .tg-ul-box { background: #fff; color: #0f0f0f; }
+.tg-ul-t { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+.tg-ul-box p { font-size: 14px; opacity: .8; line-height: 1.6; margin: 0 0 16px; }
+.tg-ul-btns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.tg-ul-btns button { border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; border-radius: 18px; padding: 8px 16px; cursor: pointer; font: inherit; font-size: 14px; }
+.tg-ul-btns .tg-ul-no { background: #3ea6ff; color: #0f0f0f; border-color: #3ea6ff; font-weight: 700; }
+.tg-ul-btns button:disabled { opacity: .5; cursor: default; }
+.tg-chip.tg-icon { padding: 0 9px; }
+/* 検索欄は🔍だけにしておき、押す（入力中・入力あり）と広がる */
+#tg-bar .tg-bar-tools .tg-qbox { flex: none; width: 34px; min-width: 0; padding: 0 8px; cursor: pointer; transition: width .2s; overflow: hidden; }
+#tg-bar .tg-bar-tools .tg-qbox input { width: 0; }
+#tg-bar .tg-bar-tools .tg-qbox:focus-within, #tg-bar .tg-bar-tools .tg-qbox.tg-has { width: 220px; cursor: text; }
+#tg-bar .tg-bar-tools .tg-qbox:focus-within input, #tg-bar .tg-bar-tools .tg-qbox.tg-has input { width: auto; }

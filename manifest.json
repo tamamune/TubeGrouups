@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TubeGroups",
-  "version": "4.14.0",
+  "version": "4.15.0",
   "description": "YouTubeの登録チャンネルをフォルダ分けして、登録チャンネルフィードをグループ別に表示します。",
   "permissions": [
     "storage",

@@ -65,6 +65,10 @@ const TGManager = (() => {
 
   // ---------- 開閉 ----------
   async function open(view = 'all') {
+    if (view === 'focus') { // 集中モードの設定を直接開く
+      if (!host) await open('all');
+      return openSettings('focus');
+    }
     if (host) return;
     const d = await TG.load();
     const { savedAt = null } = await chrome.storage.local.get('savedAt');
@@ -608,42 +612,7 @@ const TGManager = (() => {
   }
 
   // ---------- 振り分け補助 ----------
-  // フォルダ名に含まれる言葉ごとの初期キーワード
-  const DICT = {
-    '食': ['グルメ', '飯', 'めし', 'ランチ', 'ディナー', 'ラーメン', '寿司', '焼肉', '大食い', '爆食', '料理', 'レシピ', '食レポ', '食べ', 'うどん', 'カレー', '定食', 'mukbang', 'food', 'cooking'],
-    'グルメ': ['グルメ', '飯', 'ランチ', 'ラーメン', '寿司', '焼肉', '食べ', '食レポ', '料理', 'cooking', 'food'],
-    '大食': ['大食い', '爆食', 'デカ盛り', '完食', 'mukbang'],
-    '食レポ': ['食レポ', 'グルメ', '食べ歩き', '名店', '老舗'],
-    'ゲーム': ['ゲーム', '実況', 'プレイ', '攻略', 'switch', 'ps5', 'steam', 'マイクラ', 'マインクラフト', 'ポケモン', 'gaming', 'game'],
-    'レトロ': ['レトロ', 'ファミコン', 'スーファミ', 'メガドライブ', '昭和', '平成'],
-    'ゲームセンター': ['ゲーセン', 'クレーンゲーム', 'ufoキャッチャー', 'メダルゲーム'],
-    '音楽': ['歌', 'mv', 'cover', 'カバー', '歌ってみた', '弾いてみた', 'ピアノ', 'ギター', 'ライブ', 'music', 'official'],
-    'アイドル': ['アイドル', 'idol', 'ダンス', 'dance', '推し'],
-    'アニメ': ['アニメ', 'anime', '声優', '漫画', 'マンガ', 'まんが', 'pv'],
-    '心霊': ['心霊', '怖い', 'ホラー', '怪談', '廃墟', '都市伝説', 'ミステリー', '事故物件', 'オカルト', '呪'],
-    '怪談': ['怪談', '怖い話', '実話'],
-    '海外': ['海外', '外国人', '反応', '移住', '在住', '留学', 'アメリカ', '韓国', '中国', '台湾'],
-    '韓国': ['韓国', 'korea', 'ソウル', '釜山', '한국'],
-    '中国': ['中国', 'china', '中国人', '上海', '北京'],
-    'アメリカ': ['アメリカ', 'usa', 'america', 'ニューヨーク', 'ハワイ', 'ロサンゼルス'],
-    '国内': ['旅行', '観光', '日本', '温泉', '散歩', '街歩き'],
-    '沖縄': ['沖縄', '那覇', '石垣', '宮古'],
-    '函館': ['函館', '北斗', '五稜郭', '道南'],
-    '札幌': ['札幌', 'すすきの', '北海道'],
-    'ガジェット': ['ガジェット', 'レビュー', '開封', 'スマホ', 'iphone', 'pixel', 'android', 'pc', '自作', 'キーボード', 'カメラ'],
-    'vlog': ['vlog', '日常', 'ルーティン', '暮らし'],
-    'キャンプ': ['キャンプ', 'ソロキャン', '車中泊', 'アウトドア', '焚き火', '登山'],
-    'お笑い': ['お笑い', '芸人', 'コント', '漫才', 'ドッキリ', '爆笑'],
-    'スポーツ': ['スポーツ', 'サッカー', '野球', '陸上', 'バスケ', '格闘', '試合'],
-    'ダンス': ['ダンス', 'dance', '踊って'],
-    'モデル': ['モデル', 'グラビア', '撮影', 'ファッション']
-  };
-  function defaultKw(name) {
-    const n = (name || '').toLowerCase();
-    const out = n.split(/[・\/／,、\s]+/).filter(x => x.length >= 2);
-    for (const [k, v] of Object.entries(DICT)) if (n.includes(k.toLowerCase())) out.push(...v);
-    return [...new Set(out.map(x => x.toLowerCase()))];
-  }
+  const defaultKw = name => TG.defaultKw(name);
   // 候補の出し方（フォルダ設定の 🪄 の横の ⚙ で変更）
   const RULES_DEF = {
     nameScore: 3,     // チャンネル名に含まれる
@@ -961,6 +930,15 @@ const TGManager = (() => {
         if (st.pop?.kind === 'settings') return hidePop();
         return openSettings();
       case 'settab': return openSettings(el.dataset.tab);
+      case 'fc-addslot': case 'fc-delslot': case 'fc-type': case 'fc-relock': {
+        const F = await TG.focusCfg();
+        if (act === 'fc-addslot') F.slots.push({ days: [0, 6], from: '10:00', to: '12:00' });
+        if (act === 'fc-delslot') F.slots.splice(+el.dataset.si, 1);
+        if (act === 'fc-type') F.type = el.dataset.v;
+        if (act === 'fc-relock') F.unlockUntil = 0;
+        await chrome.storage.local.set({ focus: F });
+        return openFocusCfg();
+      }
       case 'nt-test': {
         const r = await chrome.runtime.sendMessage({ type: 'tg-notify-test', level: el.dataset.lv });
         return setProgress(r?.ok ? 'テスト通知を出しました' : 'テスト通知を出せませんでした');
@@ -1246,7 +1224,69 @@ const TGManager = (() => {
   }
 
   // ---------- 設定（右上の ⚙）：バックアップ・同期／振り分け補助／コメント ----------
-  const SET_TABS = [['backup', '☁ バックアップ・同期'], ['notify', '🔔 通知'], ['assist', '🪄 振り分け補助'], ['cmt', '💬 コメント']];
+  const SET_TABS = [['backup', '☁ 同期・バックアップ'], ['notify', '🔔 通知'], ['focus', '🎯 集中モード'], ['assist', '🪄 振り分け'], ['cmt', '💬 コメント']];
+  // ---------- 集中モードの設定 ----------
+  const DAYS = ['日', '月', '火', '水', '木', '金', '土'];
+  async function openFocusCfg() {
+    const F = await TG.focusCfg();
+    const stt = TG.focusState(F);
+    const hm = t => new Date(t).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+    const now = !F.on ? 'オフ' : stt.active ? `🔒 集中モード中（${hm(stt.until)} まで）` : stt.unlocked ? `一時解除中（${hm(F.unlockUntil)} まで）` : '待機中（時間帯の外）';
+    const slots = F.slots.map((sl, i) => `<div class="fc-slot" data-si="${i}">
+      <div class="fc-days">${DAYS.map((d, k) => `<label class="${sl.days.includes(k) ? 'on' : ''}"><input type="checkbox" data-fd="${k}" ${sl.days.includes(k) ? 'checked' : ''}>${d}</label>`).join('')}</div>
+      <span class="nt-win"><input type="time" data-ft="from" value="${esc(sl.from)}">〜<input type="time" data-ft="to" value="${esc(sl.to)}"></span>
+      <button class="icon" data-act="fc-delslot" data-si="${i}" title="この時間帯を消す">✕</button></div>`).join('');
+    const list = F.type === 'allow' ? F.allow : F.lock;
+    const tops = st.folders.filter(f => !f.parent || !st.folders.some(x => x.id === f.parent));
+    const fchk = (id, name, color) => `<label class="fc-f ${list.includes(id) ? 'on' : ''}"><input type="checkbox" data-ff="${esc(id)}" ${list.includes(id) ? 'checked' : ''}><i style="background:${esc(color || '#888')}"></i>${esc(name)}</label>`;
+    showPop(setAnchor(), settingsShell('focus', `<div class="bk nt fc">
+      <div class="bk-h">🎯 集中モード</div>
+      <p class="bk-note">決めた曜日・時間帯は、選んだフォルダの動画を見えなくします（通知とは別）。つい関係ない動画を見てしまうのを防ぎます。</p>
+      <label class="bk-check"><input type="checkbox" data-fg="on" ${F.on ? 'checked' : ''}><span><b>集中モードを使う</b><em>いまの状態：${now}</em></span></label>
+      <div class="bk-sub">時間帯</div>
+      <div class="fc-slots">${slots}</div>
+      <div class="bk-row"><button data-act="fc-addslot">＋ 時間帯を追加</button></div>
+      <div class="bk-sub">見えなくするフォルダ</div>
+      <div class="cm-row"><span>やり方</span><div class="cm-seg">
+        <button data-act="fc-type" data-v="lock" class="${F.type !== 'allow' ? 'on' : ''}">選んだフォルダを隠す</button>
+        <button data-act="fc-type" data-v="allow" class="${F.type === 'allow' ? 'on' : ''}">選んだフォルダだけ見られる</button></div></div>
+      <p class="bk-note">${F.type === 'allow' ? '✅ を付けたフォルダ（例：学習・ビジネス）だけ見られます。ほかのフォルダ・登録していないチャンネルは見えなくなります。' : '✅ を付けたフォルダ（例：エンタメ・ゲーム）が見えなくなります。中のフォルダも一緒に隠れます。'}</p>
+      <div class="fc-fs">${tops.map(f => fchk(f.id, f.name, f.color)).join('')}${fchk('__unsorted', '未分類', '#888')}</div>
+      <div class="bk-sub">隠す場所</div>
+      <label class="bk-check"><input type="checkbox" checked disabled><span>登録チャンネル画面（フォルダ・すべて・新着）</span></label>
+      <label class="bk-check"><input type="checkbox" data-fg="hideHome" ${F.hideHome ? 'checked' : ''}><span>ホーム・検索・再生画面の横の動画もぼかす</span></label>
+      <label class="bk-check"><input type="checkbox" data-fg="blockWatch" ${F.blockWatch ? 'checked' : ''}><span>見えないチャンネルの動画を開いたらロック画面を出す</span></label>
+      <div class="bk-sub">一時解除</div>
+      <div class="ar-row"><span>「少しだけ解除」の長さ<em>押してから10秒待つと解除できます</em></span><select data-fg="unlockMin">${opt([['5', '5分'], ['15', '15分'], ['30', '30分'], ['60', '60分']], String(F.unlockMin))}</select></div>
+      ${stt.unlocked ? '<div class="bk-row"><button data-act="fc-relock">今すぐ集中モードに戻す</button></div>' : ''}
+    </div>`), SET_OPTS);
+    const p = q('.pop');
+    const save = async patch => { const cur = await TG.focusCfg(); await chrome.storage.local.set({ focus: { ...cur, ...patch } }); TG.log('集中モード', '設定を変更'); };
+    p.querySelectorAll('[data-fg]').forEach(inp => inp.addEventListener('change', async () => {
+      const k = inp.dataset.fg;
+      await save({ [k]: inp.type === 'checkbox' ? inp.checked : +inp.value });
+      openFocusCfg();
+    }));
+    p.querySelectorAll('.fc-slot').forEach(row => row.addEventListener('change', async e => {
+      const i = +row.dataset.si;
+      const cur = await TG.focusCfg();
+      const sl = cur.slots[i];
+      if (e.target.dataset.fd != null) { const d = +e.target.dataset.fd; sl.days = e.target.checked ? [...new Set([...sl.days, d])].sort() : sl.days.filter(x => x !== d); }
+      if (e.target.dataset.ft) sl[e.target.dataset.ft] = e.target.value;
+      await save({ slots: cur.slots });
+      openFocusCfg();
+    }));
+    p.querySelectorAll('[data-ff]').forEach(inp => inp.addEventListener('change', async () => {
+      const cur = await TG.focusCfg();
+      const k = cur.type === 'allow' ? 'allow' : 'lock';
+      const set = new Set(cur[k]);
+      inp.checked ? set.add(inp.dataset.ff) : set.delete(inp.dataset.ff);
+      await save({ [k]: [...set] });
+      openFocusCfg();
+    }));
+    ['keydown', 'keyup', 'keypress'].forEach(t => p.addEventListener(t, e => e.stopPropagation()));
+  }
+
   // ---------- 通知の設定 ----------
   function syncNotifySet() {
     st.notify = new Set(st.folders.filter(f => (st.nrules.folders[f.id]?.mode || 'off') !== 'off').map(f => f.id));
@@ -1333,6 +1373,7 @@ const TGManager = (() => {
     if (tab === 'assist') return openAssistCfg();
     if (tab === 'cmt') return openCommentCfg();
     if (tab === 'notify') return openNotifyCfg();
+    if (tab === 'focus') return openFocusCfg();
     return openBackup();
   }
   async function openCommentCfg() {
@@ -1707,6 +1748,18 @@ const TGManager = (() => {
   .bk-item small{color:var(--muted)}
   .bk-item button{padding:4px 10px;font-size:12px;flex:none}
   .pop.wide{max-height:80vh;overflow-y:auto}
+  .fc-slots{display:flex;flex-direction:column;gap:8px;margin:6px 0}
+  .fc-slot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid var(--line);border-radius:10px}
+  .fc-days{display:flex;gap:3px}
+  .fc-days label{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--line);font-size:12px;cursor:pointer;user-select:none}
+  .fc-days label.on{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:700}
+  .fc-days input,.fc-f input{display:none}
+  .fc-slot .icon{margin-left:auto;padding:4px 8px}
+  .fc-fs{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}
+  .fc-f{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:16px;border:1px solid var(--line);font-size:12px;cursor:pointer;user-select:none}
+  .fc-f i{width:9px;height:9px;border-radius:3px}
+  .fc-f.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 20%,transparent);font-weight:700}
+  .fc-f.on::before{content:"✅";font-size:11px}
   .nt-rows{display:flex;flex-direction:column;gap:4px;margin:6px 0 4px}
   .nt-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;padding:3px 0 3px calc(var(--d) * 14px)}
   .nt-name{flex:1;min-width:100px;display:flex;align-items:center;gap:6px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
@@ -1719,9 +1772,9 @@ const TGManager = (() => {
   .ar-row input.nt-kw{flex:1;width:100%;text-align:left}
   .nt-help{margin:0 0 8px;padding-left:18px;font-size:12px;line-height:1.7;color:var(--muted)}
   .nt-help b{color:var(--fg)}
-  .pop.settings{width:min(520px,calc(100vw - 24px));max-width:none;padding:0;max-height:min(84vh,860px);overflow-y:auto}
+  .pop.settings{width:min(600px,calc(100vw - 24px));max-width:none;padding:0;max-height:min(84vh,860px);overflow-y:auto}
   .set-tabs{position:sticky;top:0;z-index:2;display:flex;gap:2px;padding:10px 10px 0;background:var(--card);border-bottom:1px solid var(--line)}
-  .set-tab{border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;background:transparent;padding:8px 14px;font-size:13px;color:var(--muted);margin-bottom:-1px}
+  .set-tab{white-space:nowrap;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;background:transparent;padding:8px 11px;font-size:13px;color:var(--muted);margin-bottom:-1px}
   .set-tab:hover{background:var(--card2)}
   .set-tab.on{background:var(--bg);color:var(--fg);font-weight:700;border-color:var(--line);border-bottom:1px solid var(--bg)}
   .set-body{padding:14px 16px 16px;background:var(--bg)}
