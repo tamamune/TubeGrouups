@@ -288,41 +288,85 @@ const TGX = (() => {
     go(idx + 1);
   }, true);
 
-  // ---------- 終わる前に「次の候補」4本（後で見るの中から） ----------
-  //   1本目＝次の動画（このまま待つと自動で再生）、残り3本＝後の方からランダム
-  let pickFor = null;
+  // ---------- 終わる30秒前に「次に見る動画」4本 ----------
+  //   1本目：TubeFolioの連続再生中なら次の動画 ／ YouTubeの再生リストで見ているならリストの次の動画
+  //   2本目以降：TubeFolioの「後で見る」からランダム（無ければYouTubeのおすすめ＝関連動画）
+  //   出す場面（pickMode）：'auto'＝連続再生・再生リストのとき（初期） ／ 'always'＝いつも ／ 'off'＝出さない
+  const PICK_SEC = 30;
+  let pickFor = null, pickMode = 'auto';
+  chrome.storage.local.get('pickMode').then(r => { pickMode = r.pickMode || 'auto'; });
+  chrome.storage.onChanged?.addListener(ch => { if (ch.pickMode) pickMode = ch.pickMode.newValue || 'auto'; });
+  const listParam = () => new URLSearchParams(location.search).get('list');
   document.addEventListener('timeupdate', e => {
     const vEl = e.target;
-    if (vEl.tagName !== 'VIDEO' || !Q?.pick) return;
+    if (vEl.tagName !== 'VIDEO' || pickMode === 'off') return;
     if (document.querySelector('#movie_player.ad-showing')) return;
     const v = curVid();
-    const idx = Q.items.findIndex(x => x.v === v);
-    if (idx < 0 || idx >= Q.items.length - 1) return;
+    if (!v) return;
+    const inQueue = Q?.pick && Q.items.some(x => x.v === v);
+    const inList = !!listParam();
+    if (!inQueue && !inList && pickMode !== 'always') return;
     const left = (vEl.duration || 0) - vEl.currentTime;
-    if (!vEl.duration || !isFinite(left)) return;
-    if (left <= 20 && left > 0.5 && pickFor !== v) { pickFor = v; showPicker(idx); }
-    if (left > 25 && pickFor === v) { pickFor = null; document.getElementById('tg-pick')?.remove(); }
+    if (!vEl.duration || !isFinite(left) || vEl.duration < 45) return;
+    if (left <= PICK_SEC && left > 0.5 && pickFor !== v) { pickFor = v; showPicker(v, inQueue).catch(() => {}); }
+    if (left > PICK_SEC + 5 && pickFor === v) { pickFor = null; document.getElementById('tg-pick')?.remove(); }
   }, true);
-  function showPicker(idx) {
-    document.getElementById('tg-pick')?.remove();
+  // YouTubeの再生リスト（右側のリスト）で、今の次の動画
+  function nextInYtList() {
+    const rows = [...document.querySelectorAll('ytd-playlist-panel-renderer #items ytd-playlist-panel-video-renderer')];
+    const i = rows.findIndex(r => r.hasAttribute('selected'));
+    const r = i >= 0 ? rows[i + 1] : null;
+    const a = r?.querySelector('a[href*="watch?v="]');
+    const v = (a?.getAttribute('href') || '').match(/[?&]v=([\w-]{11})/)?.[1];
+    if (!v) return null;
+    return { v, t: (r.querySelector('#video-title')?.textContent || '').trim(), ch: (r.querySelector('#byline, #channel-name')?.textContent || '').trim(), url: a.getAttribute('href'), first: 'リストの次' };
+  }
+  async function showPicker(v, inQueue) {
     const player = document.querySelector('#movie_player');
     if (!player) return;
-    const rest = Q.items.map((x, i) => ({ ...x, i })).slice(idx + 1);
-    const next = rest[0];
-    const others = rest.slice(1).sort(() => Math.random() - 0.5).slice(0, 3);
-    const list = [next, ...others].filter(Boolean);
+    const out = [];
+    const skip = new Set([v]);
+    // 1本目
+    if (inQueue) {
+      const idx = Q.items.findIndex(x => x.v === v);
+      const n = Q.items[idx + 1];
+      if (n) { out.push({ ...n, qi: idx + 1, first: '次' }); skip.add(n.v); }
+    } else if (listParam()) {
+      const n = nextInYtList();
+      if (n) { out.push(n); skip.add(n.v); }
+    }
+    // 2本目以降：TubeFolioの後で見るからランダム
+    const later = (await getLater()).filter(x => !skip.has(x.v) && !x.short);
+    for (const x of later.sort(() => Math.random() - 0.5)) {
+      if (out.length >= 4) break;
+      out.push({ v: x.v, t: x.t, ch: x.ch?.name || '', d: x.d || 0, url: '/watch?v=' + x.v + (x.list ? '&list=' + x.list : ''), src: '後で見る' });
+      skip.add(x.v);
+    }
+    // 足りなければYouTubeのおすすめ（関連動画）
+    if (out.length < 4) {
+      try {
+        const rel = (await YTAPI.related(v)).filter(x => !skip.has(x.v) && !x.short && !x.live);
+        for (const x of rel) { if (out.length >= 4) break; out.push({ v: x.v, t: x.t, ch: x.chName, d: x.dur || 0, url: '/watch?v=' + x.v, src: 'おすすめ' }); skip.add(x.v); }
+      } catch { /* 取れなければそのまま */ }
+    }
+    if (!out.length || curVid() !== v) return;
+    document.getElementById('tg-pick')?.remove();
     const dur = s => { s = Math.round(s || 0); if (!s) return ''; const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0'); };
     const box = document.createElement('div');
     box.id = 'tg-pick';
-    box.innerHTML = `<div class="tg-pk-h"><b>次に見る動画</b><span>（${esc(Q.title)}から・選ばなければ「次」を自動で再生）</span><button class="tg-pk-x" title="閉じる">✕</button></div>
-      <div class="tg-pk-list">${list.map((x, k) => `<button class="tg-pk-item ${k === 0 ? 'next' : ''}" data-i="${x.i}">
-        <span class="tg-pk-th"><img src="https://i.ytimg.com/vi/${esc(x.v)}/mqdefault.jpg" alt="">${x.d ? `<i>${dur(x.d)}</i>` : ''}${k === 0 ? '<em>次</em>' : ''}</span>
+    const note = out[0].first ? '選ばなければ「' + out[0].first + '」を自動で再生' : '押すとその動画へ';
+    box.innerHTML = `<div class="tg-pk-h"><b>次に見る動画</b><span>（${note}）</span><button class="tg-pk-x" title="閉じる">✕</button></div>
+      <div class="tg-pk-list">${out.map((x, k) => `<button class="tg-pk-item ${x.first ? 'next' : ''}" data-k="${k}">
+        <span class="tg-pk-th"><img src="https://i.ytimg.com/vi/${esc(x.v)}/mqdefault.jpg" alt="">${x.d ? `<i>${dur(x.d)}</i>` : ''}${x.first ? `<em>${esc(x.first)}</em>` : x.src ? `<em class="sub">${esc(x.src)}</em>` : ''}</span>
         <span class="tg-pk-t">${esc(x.t || '')}</span><span class="tg-pk-c">${esc(x.ch || '')}</span></button>`).join('')}</div>`;
     ['click', 'dblclick', 'mousedown', 'mouseup', 'keydown'].forEach(t => box.addEventListener(t, ev => ev.stopPropagation()));
     box.addEventListener('click', ev => {
       if (ev.target.closest('.tg-pk-x')) { box.remove(); return; }
       const b = ev.target.closest('.tg-pk-item');
-      if (b) go(+b.dataset.i);
+      if (!b) return;
+      const x = out[+b.dataset.k];
+      if (x.qi != null) go(x.qi);
+      else location.assign(x.url || '/watch?v=' + x.v);
     });
     player.appendChild(box);
   }

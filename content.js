@@ -19,13 +19,14 @@
     caret: P('M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z'),
     stats: P('M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z'),
     new: P('M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM8.5 15H7.3l-2.55-3.5V15H3.5V9h1.25l2.5 3.5V9H8.5v6zm5-4.74H11v1.12h2.5v1.26H11v1.11h2.5V15h-4V9h4v1.26zm7 3.74c0 .55-.45 1-1 1h-4c-.55 0-1-.45-1-1V9h1.25v4.51h1.13V9.99h1.25v3.51h1.12V9h1.25v5z'),
+    bm: P('M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2zm0 15-5-2.18L7 18V5h10v13z'),
     later: P('M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.2 3.2.8-1.3-4.5-2.7V7z'),
     rec: P('M12 10.9c-.61 0-1.1.49-1.1 1.1s.49 1.1 1.1 1.1c.61 0 1.1-.49 1.1-1.1s-.49-1.1-1.1-1.1zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm2.19 12.19L6 18l3.81-8.19L18 6l-3.81 8.19z'),
     grid: P('M3 3h8v8H3V3zm2 2v4h4V5H5zm8-2h8v8h-8V3zm2 2v4h4V5h-4zM3 13h8v8H3v-8zm2 2v4h4v-4H5zm8-2h8v8h-8v-8zm2 2v4h4v-4h-4z')
   };
 
   // 新着件数・後で見るの本数
-  let NC = new Map(), laterN = 0;
+  let NC = new Map(), laterN = 0, bmN = 0;
   // 件数が変わったときだけ描き直す。呼び出しは1.5秒まとめる
   let countsT = null, countsSig = '';
   function refreshCounts() {
@@ -33,11 +34,12 @@
     countsT = setTimeout(doRefreshCounts, 1500);
   }
   async function doRefreshCounts() {
-    const { recent = [], folderSeen = {}, watched = {}, later = [] } = await chrome.storage.local.get(['recent', 'folderSeen', 'watched', 'later']);
+    const { recent = [], folderSeen = {}, watched = {}, later = [], bookmarks = [] } = await chrome.storage.local.get(['recent', 'folderSeen', 'watched', 'later', 'bookmarks']);
+    bmN = bookmarks.length;
     NC = TGX.newCounts(S, recent, watched, folderSeen);
     laterN = later.length;
     setLaterSet(later);
-    const sig = JSON.stringify([...NC]) + laterN;
+    const sig = JSON.stringify([...NC]) + laterN + '|' + bmN;
     if (sig === countsSig) return;
     countsSig = sig;
     renderGuide(true);
@@ -182,7 +184,7 @@
       `<a class="tg-g-item ${on ? 'tg-on' : ''}" ${attrs} style="padding-left:${pad}px">${icon}<span class="tg-g-name">${esc(name)}</span>${extra}</a>`;
 
     let h = '<div class="tg-g-block">';
-    for (const [t, def] of Object.entries(TGFeed.TYPES)) h += item(`data-type="${t}"`, IC[t], def.label, onSubs && S.feedType === t, t === 'later' && laterN ? `<span class="tg-g-num">${laterN}</span>` : t === 'new' ? badge(NC.get('__all')) : '');
+    for (const [t, def] of Object.entries(TGFeed.TYPES)) h += item(`data-type="${t}"`, IC[t], def.label, onSubs && S.feedType === t, t === 'later' && laterN ? `<span class="tg-g-num">${laterN}</span>` : t === 'new' ? badge(NC.get('__all')) : t === 'bm' && bmN ? `<span class="tg-g-num">${bmN}</span>` : '');
     h += item('data-act="stats"', IC.stats, '視聴記録', false);
     h += '</div><div class="tg-g-block"><div class="tg-g-title">フォルダ</div>';
     for (const { f, depth, hidden } of TG.tree(S.folders)) {
@@ -221,7 +223,7 @@
       S.feedType = a.dataset.type;
       await chrome.storage.local.set({ feedType: S.feedType });
     } else if (a.dataset.f) {
-      const wasRec = S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new';
+      const wasRec = S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new' || S.feedType === 'bm';
       if (wasRec) { S.feedType = 'video'; await chrome.storage.local.set({ feedType: 'video' }); } // おすすめ画面ではフォルダが効かないので動画に戻す
       S.activeGroup = isSubsFeed() && !wasRec && S.activeGroup === a.dataset.f ? null : a.dataset.f;
       await TG.setActive(S.activeGroup);
@@ -367,7 +369,7 @@
   }
   function buildBar(bar) {
     // 表示の種類・フォルダが変わったら絞り込みを解除
-    const key = S.feedType + '|' + (S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new' ? '' : S.activeGroup);
+    const key = S.feedType + '|' + (['rec', 'later', 'new', 'bm'].includes(S.feedType) ? '' : S.activeGroup);
     if (key !== qKey) { qKey = key; if (qText) { qText = ''; TGFeed.setQuery(''); } }
     const act = document.activeElement;
     const keepFocus = act?.classList?.contains('tg-q') && bar.contains(act) ? [act.selectionStart, act.selectionEnd] : null;
@@ -382,7 +384,7 @@
 
     // 1段目：表示の種類・列数・操作
     const seg = (attr, val, label, on) => `<button class="tg-seg-btn ${on ? 'tg-active' : ''}" ${attr}="${val}">${label}</button>`;
-    const types = Object.entries(TGFeed.TYPES).map(([t, d]) => seg('data-type', t, d.short || d.label, S.feedType === t)).join('');
+    const types = Object.entries(TGFeed.TYPES).filter(([t, d]) => !d.sideOnly || S.feedType === t).map(([t, d]) => seg('data-type', t, d.short || d.label, S.feedType === t)).join('');
     const cols = [3, 4, 5, 6, 7].map(n => seg('data-cols', n, n, S.cols === n)).join('');
     const play = S.feedType === 'video' || S.feedType === 'live' || S.feedType === 'later' || S.feedType === 'new'
       ? '<button class="tg-chip tg-play" data-play="1" title="表示中の未視聴の動画を、新しい順に続けて再生">▶ 連続再生</button>' : '';
@@ -421,7 +423,7 @@
       const kindSeg = `<div class="tg-seg" title="動画／ショート">${seg('data-reckind', 'video', '動画', S.recKind !== 'short')}${seg('data-reckind', 'short', 'ショート', S.recKind === 'short')}</div>`;
       const modeSeg = `<div class="tg-seg">${seg('data-recmode', 'rec', `${IC.rec}おすすめ`, !srch)}${seg('data-recmode', 'search', '🔍 お気に入り以外を検索', srch)}</div>`;
       row2 = `<div class="tg-chips tg-folders">${modeSeg}${kindSeg}<span class="tg-sub-lb">${srch ? '登録していないチャンネルから探す' : '未登録チャンネルのみ'}</span>
-        ${srch ? '' : `<button class="tg-chip tg-ghost ${recPrefsOpen ? "tg-open" : ""}" data-recprefs="1" title="日本語の動画の割合・フォルダごとの比重">⚖ 比重</button><button class="tg-chip tg-ghost" data-reload="1">更新</button>`}</div>`;
+        ${srch ? '' : '<button class="tg-chip tg-ghost" data-reload="1">更新</button>'}</div>`;
       if (!srch && recPrefsOpen && recPrefsCache) {
         const P = recPrefsCache;
         const WL = [[3, '多め'], [1, '普通'], [0.3, '少なめ'], [0, '使わない']];
@@ -459,6 +461,9 @@
         ${tops.map(f => cat(f.id, f.name, f.color, NC.get(f.id))).join('')}${cat('__unsorted', '未分類', '', NC.get('__unsorted'))}
         <button class="tg-chip tg-ghost" data-reload="1" title="今すぐ新着を確認">更新</button></div>`;
       cur = null; curName = '新着動画'; totalNew = NC.get('__all');
+    } else if (S.feedType === 'bm') {
+      row2 = `<div class="tg-chips tg-folders"><span class="tg-bar-title">${IC.bm}ブックマーク<small>再生中に B キーで、その時間を保存</small></span></div>`;
+      cur = null; curName = 'ブックマーク'; totalNew = 0;
     } else if (S.feedType === 'later') {
       const off = new Set(S.laterOff);
       const cat = (id, name, color) => `<button class="tg-chip tg-cat ${off.has(id) ? '' : 'tg-active'}" data-lcat="${esc(id)}" title="${off.has(id) ? '押すと表示' : '押すと隠す'}">${fById.get(id) && (fById.get(id).icon || fById.get(id).iconImg) ? TG.iconHtml(fById.get(id)) : color ? `<i class="tg-cdot" style="background:${esc(color)}"></i>` : ''}<span class="tg-clabel">${esc(name)}</span></button>`;
@@ -596,7 +601,7 @@
       await chrome.storage.local.set({ cols: S.cols });
       return;
     } else if ('g' in b.dataset) {
-      if (S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new') { S.feedType = 'video'; await chrome.storage.local.set({ feedType: 'video' }); }
+      if (S.feedType === 'rec' || S.feedType === 'later' || S.feedType === 'new' || S.feedType === 'bm') { S.feedType = 'video'; await chrome.storage.local.set({ feedType: 'video' }); }
       S.activeGroup = b.dataset.g || null;
       await TG.setActive(S.activeGroup);
     }
@@ -1273,6 +1278,37 @@
     TGManager.open();
   }
 
+  // ---------- ブックマーク：再生中に B キーで、その瞬間の時間を保存 ----------
+  document.addEventListener('keydown', async e => {
+    if (e.key !== 'b' && e.key !== 'B') return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    const v = isWatchPage() ? new URLSearchParams(location.search).get('v') : isShortsPage() ? location.pathname.split('/')[2] : null;
+    const video = document.querySelector('#movie_player video, ytd-reel-video-renderer[is-active] video, video');
+    if (!v || !video) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sec = Math.floor(video.currentTime || 0);
+    const ch = currentChannel();
+    const title = (document.querySelector('ytd-watch-metadata h1, #title h1')?.textContent || document.title.replace(/ - YouTube$/, '')).trim();
+    const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
+    bookmarks.unshift({ id: v + '@' + sec + '@' + Date.now().toString(36), v, t: title, ch: ch?.name || '', k: ch?.key || '', sec, d: Math.round(video.duration || 0), at: Date.now() });
+    await chrome.storage.local.set({ bookmarks: bookmarks.slice(0, 3000) });
+    const mm = s => (s >= 3600 ? Math.floor(s / 3600) + ':' + String(Math.floor(s % 3600 / 60)).padStart(2, '0') : Math.floor(s / 60)) + ':' + String(s % 60).padStart(2, '0');
+    bmToast(`🔖 ${mm(sec)} をブックマークしました`);
+    TG.log('ブックマーク', `${title}（${mm(sec)}）`);
+  }, true);
+  function bmToast(msg) {
+    document.getElementById('tg-bmtoast')?.remove();
+    const d = document.createElement('div');
+    d.id = 'tg-bmtoast';
+    d.textContent = msg;
+    (document.querySelector('#movie_player') || document.body).appendChild(d);
+    setTimeout(() => d.classList.add('out'), 1600);
+    setTimeout(() => d.remove(), 2200);
+  }
+
   // ---------- 画面内の通知（右下からスライド） ----------
   const TOAST_MS = { high: 0, normal: 12000, low: 6000 }; // 0＝閉じるまで残す
   function showToasts(items) {
@@ -1303,7 +1339,7 @@
     if (changes.openManager?.newValue) checkOpenRequest();
     if (changes.watched) TGFeed.setWatched(changes.watched.newValue);
     if (changes.later) { TGFeed.setLater(changes.later.newValue); setLaterSet(changes.later.newValue || []); }
-    if (changes.recent || changes.folderSeen || changes.watched || changes.later) refreshCounts();
+    if (changes.recent || changes.folderSeen || changes.watched || changes.later || changes.bookmarks) refreshCounts();
     if (changes.recent && isSubsFeed() && S.feedType === 'new') setTimeout(() => TGFeed.refresh(S), 300);
     if (changes.queue) TGX.syncQueue();
     if (changes.hideWatched) { S.hideWatched = !!changes.hideWatched.newValue; TGFeed.setHideWatched(S.hideWatched); }

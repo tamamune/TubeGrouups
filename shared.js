@@ -205,7 +205,7 @@ const TG = {
       folders: folders || [],
       meta: meta || {},
       activeGroup: activeGroup ?? null,
-      feedType: ['new', 'video', 'live', 'short', 'rec', 'later'].includes(feedType) ? feedType : 'video',
+      feedType: ['new', 'video', 'live', 'short', 'rec', 'later', 'bm'].includes(feedType) ? feedType : 'video',
       cols: cols >= 3 && cols <= 7 ? cols : 4,
       // 未設定なら 動画3列・ショート5列。「自動」を選ぶと null が保存される
       homeCols: homeCols === null ? null : homeCols >= 3 && homeCols <= 7 ? homeCols : 3,
@@ -224,8 +224,8 @@ const TG = {
   // 保存の種類（Drive・ファイル共通）
   AUX: {
     history: ['history', 'daily', 'watched', 'ytHistSeen'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
-    later: ['later', 'laterRemoved'],                      // 後で見る（外した記録も）
-    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'notifyRules', 'focus', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
+    later: ['later', 'laterRemoved', 'bookmarks', 'bmRemoved'],                      // 後で見る（外した記録も）
+    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'cmOpen', 'pickMode', 'notifyRules', 'focus', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
   },
 
   // opts: { meta, history, later, prefs }（省略時はすべて含める）
@@ -294,6 +294,14 @@ const TG = {
       // 外した記録は90日で消す
       const cut = Date.now() - 90 * 864e5;
       set.laterRemoved = Object.fromEntries(Object.entries(removed).filter(([, at]) => at > cut));
+      // ブックマーク：両方を合わせる（消した記録 bmRemoved は戻さない）
+      if (lt.bookmarks || lt.bmRemoved) {
+        const rm = { ...(L.bmRemoved || {}), ...(lt.bmRemoved || {}) };
+        const bm = new Map();
+        for (const x of [...(L.bookmarks || []), ...(lt.bookmarks || [])]) if (x?.id && !rm[x.id]) bm.set(x.id, { ...(bm.get(x.id) || {}), ...x });
+        set.bookmarks = [...bm.values()].sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 3000);
+        set.bmRemoved = Object.fromEntries(Object.entries(rm).filter(([, at]) => at > cut));
+      }
     }
     // 設定は、Drive側の方が新しく変更されているときだけ反映（このPCで変えたばかりの設定を古い値で戻さない）
     let prefsApplied = false;

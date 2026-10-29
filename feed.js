@@ -8,7 +8,8 @@ const TGFeed = (() => {
     live: { label: 'ライブ・配信', pl: 'UULV' },
     short: { label: 'ショート', pl: 'UUSH' },
     rec: { label: 'おすすめ', short: 'おすすめ', pl: '' },
-    later: { label: '後で見る', short: '後で見る', pl: '' }
+    later: { label: '後で見る', short: '後で見る', pl: '' },
+    bm: { label: 'ブックマーク', short: 'ブックマーク', pl: '', sideOnly: true }
   };
   let laterSet = new Set();
   chrome.storage.local.get('later').then(({ later = [] }) => { laterSet = new Set(later.map(x => x.v)); });
@@ -66,7 +67,7 @@ const TGFeed = (() => {
   }
   // 動画・ライブ・ショートは30チャンネルずつ取得し、表示も30件ずつ
   const BATCH = 30, PAGE = 30;
-  const BATCHED = t => t !== 'rec' && t !== 'later' && t !== 'new';
+  const BATCHED = t => t !== 'rec' && t !== 'later' && t !== 'new' && t !== 'bm';
   let batch = { chs: [], loaded: 0, loading: false };
   const CACHE = 'feedCache4';
   const TTL = 10 * 60e3;
@@ -163,6 +164,7 @@ const TGFeed = (() => {
   function signature(S) {
     if (FX.active && S.activeGroup && !['rec', 'later', 'new'].includes(S.feedType) && FX.folderLocked(S.activeGroup)) return 'locked:' + S.activeGroup;
     if (S.feedType === 'later') return 'later:' + Date.now(); // 毎回作り直す（カテゴリの切り替えも含む）
+    if (S.feedType === 'bm') return 'bm:' + Date.now();
     if (S.feedType === 'new') return JSON.stringify(['new', FX.active, S.newOff, S.folders.map(f => [f.id, f.keys.length, f.parent]), Object.values(S.channels).filter(c => c.hidden).length]);
     if (S.feedType === 'rec') return JSON.stringify(['rec', S.recMode, S.recKind, S.recMode === 'search' ? TG.searchQuery(S.folders, S.sFolder, S.sText) : '', favSetOf(S).size, S.folders.map(f => [f.name, f.color, f.keys.length])]);
     return JSON.stringify([S.activeGroup, S.feedType, targets(S).map(c => c.key), S.folders.map(f => [f.name, f.color])]);
@@ -212,6 +214,16 @@ const TGFeed = (() => {
           return TGX.startQueue(list.slice(i).filter(x => !x.short), title.slice(0, 40), { pick: true });
         }
       }
+      const bmrm = e.target.closest('[data-bmrm]');
+      if (bmrm) {
+        e.preventDefault(); e.stopPropagation();
+        const { bookmarks = [], bmRemoved = {} } = await chrome.storage.local.get(['bookmarks', 'bmRemoved']);
+        bmRemoved[bmrm.dataset.bmrm] = Date.now();
+        await chrome.storage.local.set({ bookmarks: bookmarks.filter(x => x.id !== bmrm.dataset.bmrm), bmRemoved });
+        items = items.filter(x => x.bm !== bmrm.dataset.bmrm);
+        bmrm.closest('.tg-card')?.remove();
+        return status(`ブックマーク ${items.length} 件`);
+      }
       const rm = e.target.closest('[data-wlrm]');
       if (rm) { e.preventDefault(); e.stopPropagation(); return removeWl(rm); }
       const b = e.target.closest('[data-later]');
@@ -241,7 +253,7 @@ const TGFeed = (() => {
   function card(it) {
     const short = curType === 'short' || (curType === 'rec' && !!it.short);
     const shortUrl = short || (curType === 'later' && it.short);
-    const url = shortUrl ? `/shorts/${it.v}` : `/watch?v=${it.v}${it.list ? '&list=' + encodeURIComponent(it.list) : ''}`;
+    const url = shortUrl ? `/shorts/${it.v}` : `/watch?v=${it.v}${it.list ? '&list=' + encodeURIComponent(it.list) : ''}${it.sec != null ? '&t=' + Math.floor(it.sec) + 's' : ''}`;
     const hq = `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/hqdefault.jpg`;
     const src = /^https:\/\/i\d?\.ytimg\.com\//.test(it.th || '') ? it.th : short ? `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/oardefault.jpg` : hq;
     const now = Date.now();
@@ -249,7 +261,7 @@ const TGFeed = (() => {
     if (it.live) badge = '<span class="tg-badge tg-live">● ライブ配信中</span>';
     else if (it.up && it.up > now) badge = `<span class="tg-badge tg-up">配信予定 ${new Date(it.up).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>`;
     else if (it.p && now - it.p < 2 * 864e5) badge = '<span class="tg-badge">新着</span>';
-    const when = it.live ? '配信中' : it.up && it.up > now ? '配信予定' : it.p ? TG.rel(it.p) : '';
+    const when = it.bm ? `${TG.rel(it.savedAt)}に保存` : it.live ? '配信中' : it.up && it.up > now ? '配信予定' : it.p ? TG.rel(it.p) : '';
     const tags = (folderMap.get(it.ch.key) || []).map(f => `<span class="tg-ftag" style="--c:${esc(f.color)}">${esc(f.name)}</span>`).join('');
     const chLine = `<div class="tg-sub tg-chline"><span class="tg-chname">${esc(it.ch.name)}</span>${tags}${!short && when ? `<span class="tg-when"> • ${when}</span>` : ''}</div>`;
     const sub = short
@@ -260,9 +272,9 @@ const TGFeed = (() => {
     return `<a class="tg-card ${it.ch.unsub ? 'tg-nofav' : 'tg-fav'}${wcls}" href="${url}" title="${esc(it.t)}" data-v="${esc(it.v)}" data-w="${it.w || 0}" style="--tg-wpn:${wp / 100}">
       <div class="tg-thumb"><img src="${esc(src)}" data-fb="${hq}" alt="" ${shown < 30 ? '' : 'loading="lazy"'} decoding="async" referrerpolicy="no-referrer">
         ${badge}${it.d && !it.live && !(it.up > now) ? `<span class="tg-dur">${fmtDur(it.d)}</span>` : ''}<span class="tg-wbadge">${wLabel(wp)}</span><span class="tg-wbar"></span>
-        ${it.wlSrc ? `<button class="tg-later tg-wlrm" data-wlrm="${esc(it.v)}" data-pl="${esc(it.pl || 'WL')}" title="YouTubeの${it.pl && it.pl !== 'WL' ? '再生リスト' : '「後で見る」'}から削除">✕</button>`
+        ${it.bm ? `<span class="tg-bmtime">🔖 ${fmtDur(it.sec)}</span><button class="tg-later tg-wlrm" data-bmrm="${esc(it.bm)}" title="ブックマークを消す">✕</button>` : it.wlSrc ? `<button class="tg-later tg-wlrm" data-wlrm="${esc(it.v)}" data-pl="${esc(it.pl || 'WL')}" title="YouTubeの${it.pl && it.pl !== 'WL' ? '再生リスト' : '「後で見る」'}から削除">✕</button>`
           : `<button class="tg-later ${laterSet.has(it.v) ? 'on' : ''}" data-later="${esc(it.v)}" title="${laterSet.has(it.v) ? '後で見るから外す' : '後で見るに追加'}">${laterSet.has(it.v) ? '✓' : '🕒'}</button>`}</div>
-      ${curType === 'later' ? `<div class="tg-title-row"><div class="tg-title">${esc(it.t)}</div><button class="tg-cmenu" data-cmenu="${esc(it.v)}" data-pl="${esc(it.wlSrc ? it.pl || 'WL' : '')}" title="メニュー">⋮</button></div>` : `<div class="tg-title">${esc(it.t)}</div>`}
+      <div class="tg-title-row"><div class="tg-title">${esc(it.t)}</div><button class="tg-cmenu" data-cmenu="${esc(it.v)}" data-pl="${esc(curType !== 'later' ? '-' : it.wlSrc ? it.pl || 'WL' : '')}" title="メニュー">⋮</button></div>
       ${short ? chLine : ''}${sub}</a>`;
   }
 
@@ -573,6 +585,15 @@ const TGFeed = (() => {
     else (pls.list || []).filter(p => isOpen(p.id)).forEach(p => loadPl(p.id));
     await Promise.all(jobs);
   }
+  // ---------- ブックマーク（再生中に B キーで保存した時間） ----------
+  async function paintBm(S) {
+    const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
+    const fav = favSetOf(S);
+    const list = bookmarks.map(b => ({ v: b.v, t: b.t, p: 0, d: b.d || 0, sec: b.sec, bm: b.id, note: b.note || '', savedAt: b.at, ch: { key: b.k || b.ch?.key || '', name: (typeof b.ch === 'object' ? b.ch?.name : b.ch) || '', unsub: !((b.k || b.ch?.key) && fav.has(b.k || b.ch?.key)) } }));
+    paint(list, list.length ? `ブックマーク ${list.length} 件（新しい順）・押すとその時間から再生` : '');
+    if (!list.length) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">ブックマークはまだありません。<br>動画を再生中に <b>B</b> キーを押すと、その時間を保存できます。</div>';
+  }
+
   // 後で見るの一覧（段ごと）の動画
   function laterSecItems(id) {
     if (!id) return [];
@@ -584,30 +605,46 @@ const TGFeed = (() => {
   document.addEventListener('click', e => { if (!e.target.closest?.('#tg-cardmenu') && !e.target.closest?.('[data-cmenu]')) closeCardMenu(); }, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCardMenu(); });
   window.addEventListener('scroll', closeCardMenu, { passive: true });
+  let cmOpen = null; // メニューの「移動」「保存」の開閉（次に開いたときも同じ）
   async function openCardMenu(btn) {
     closeCardMenu();
-    const v = btn.dataset.cmenu, from = btn.dataset.pl || ''; // from: '' = TubeFolioの後で見る ／ 'WL' ／ 再生リストID
-    const it = items.find(x => x.v === v && (from ? x.wlSrc && (x.pl || 'WL') === from : !x.wlSrc));
+    if (!cmOpen) cmOpen = (await chrome.storage.local.get('cmOpen')).cmOpen || { move: true, save: false };
+    // from: '' = TubeFolioの後で見る ／ 'WL' ／ 再生リストID ／ '-' = 新着・動画・おすすめなどの一覧
+    const v = btn.dataset.cmenu, from = btn.dataset.pl || '';
+    const inFeed = from === '-';
+    const it = inFeed ? items.find(x => x.v === v) : items.find(x => x.v === v && (from ? x.wlSrc && (x.pl || 'WL') === from : !x.wlSrc));
     if (!it) return;
+    // 再生リストの一覧がまだなら読み込む
+    if (!pls.list) {
+      try { pls = { at: Date.now(), list: await YTAPI.myPlaylists(), error: '' }; } catch (e) { pls = { at: 0, list: [], error: e.message }; }
+    }
     const m = document.createElement('div');
     m.id = 'tg-cardmenu';
     const plName = id => id === 'WL' ? 'YouTubeの「後で見る」' : (pls.list || []).find(p => p.id === id)?.title || '再生リスト';
     const targets = [{ id: 'WL', title: 'YouTubeの「後で見る」' }, ...(pls.list || [])].filter(p => p.id !== from);
-    const sub = act => targets.map(p => `<button data-cm="${act}" data-to="${esc(p.id)}">${p.id === 'WL' ? '🕒' : '📃'} ${esc(p.title)}</button>`).join('') || '<div class="tg-cm-note">再生リストを読み込み中です。少し待ってから開き直してください。</div>';
+    const sub = act => targets.map(p => `<button data-cm="${act}" data-to="${esc(p.id)}">${p.id === 'WL' ? '🕒' : '📃'} ${esc(p.title)}</button>`).join('') || `<div class="tg-cm-note">${pls.error ? '再生リストを読み込めませんでした' : '再生リストがありません'}</div>`;
+    const sec = (key, title, body) => `<details class="tg-cm-acc" data-acc="${key}" ${cmOpen[key] ? 'open' : ''}><summary>${title}</summary>${body}</details>`;
+    const inLater = laterSet.has(v);
     m.innerHTML = `
       <button data-cm="play">▶ ここから連続再生</button>
+      ${inFeed ? `<button data-cm="${inLater ? 'unlater' : 'later'}">${inLater ? '✓ TubeFolioの後で見るから外す' : '🕒 TubeFolioの後で見るに追加'}</button>` : ''}
       <div class="tg-cm-sep"></div>
-      <div class="tg-cm-h">➡ 移動（${from ? `${esc(plName(from))}から外す` : 'TubeFolioの後で見るから外す'}）</div>
-      ${from ? '<button data-cm="move" data-to="tg">🕒 TubeFolioの後で見る</button>' : ''}${sub('move')}
-      <div class="tg-cm-sep"></div>
-      <div class="tg-cm-h">💾 保存（このまま残す）</div>${sub('save')}
-      <div class="tg-cm-sep"></div>
-      <button data-cm="remove">🗑 ${from ? `${esc(plName(from))}から削除` : 'TubeFolioの後で見るから外す'}</button>`;
+      ${inFeed ? '' : sec('move', `➡ 移動<small>（${from ? `${esc(plName(from))}から外す` : 'TubeFolioの後で見るから外す'}）</small>`, (from ? '<button data-cm="move" data-to="tg">🕒 TubeFolioの後で見る</button>' : '') + sub('move')) + '<div class="tg-cm-sep"></div>'}
+      ${sec('save', inFeed ? '💾 再生リストに保存' : '💾 保存<small>（このまま残す）</small>', sub('save'))}
+      ${inFeed ? '' : `<div class="tg-cm-sep"></div><button data-cm="remove">🗑 ${from ? `${esc(plName(from))}から削除` : 'TubeFolioの後で見るから外す'}</button>`}`;
+    m.querySelectorAll('.tg-cm-acc').forEach(d => d.addEventListener('toggle', () => {
+      cmOpen = { ...cmOpen, [d.dataset.acc]: d.open };
+      chrome.storage.local.set({ cmOpen });
+      placeMenu();
+    }));
     document.body.appendChild(m);
-    const r = btn.getBoundingClientRect();
-    const w = m.offsetWidth, h = m.offsetHeight;
-    m.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.right - w)) + 'px';
-    m.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + 'px';
+    function placeMenu() {
+      const r = btn.getBoundingClientRect();
+      const w = m.offsetWidth, h = m.offsetHeight;
+      m.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.right - w)) + 'px';
+      m.style.top = (r.bottom + h + 8 < innerHeight ? r.bottom + 4 : Math.max(8, r.top - h - 4)) + 'px';
+    }
+    placeMenu();
     m.addEventListener('click', async e => {
       const b = e.target.closest('[data-cm]');
       if (!b) return;
@@ -615,9 +652,17 @@ const TGFeed = (() => {
       const act = b.dataset.cm, to = b.dataset.to;
       if (act === 'play') {
         closeCardMenu();
-        const sec = from || 'tg';
-        const list = laterSecItems(sec);
+        if (inFeed) {
+          const list = visible().filter(x => !x.short && !x.live && !(x.up > Date.now()));
+          return TGX.startQueue(list.slice(Math.max(0, list.findIndex(x => x.v === v))), TYPES[curType]?.label || '一覧', { pick: true });
+        }
+        const list = laterSecItems(from || 'tg');
         return TGX.startQueue(list.slice(Math.max(0, list.findIndex(x => x.v === v))).filter(x => !x.short), from ? plName(from) : '後で見る', { pick: true });
+      }
+      if (act === 'later' || act === 'unlater') {
+        await TGX.toggleLater(it);
+        closeCardMenu();
+        return status(act === 'later' ? `「${it.t}」をTubeFolioの後で見るに追加しました` : `「${it.t}」をTubeFolioの後で見るから外しました`);
       }
       b.disabled = true;
       try {
@@ -880,10 +925,46 @@ const TGFeed = (() => {
     if (first && !rec.items.length) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">おすすめが見つかりませんでした。「⚖ 比重」の設定を見直すか、しばらくしてから「更新」してください。</div>';
   }
 
+  // おすすめ（動画）：YouTubeのホームのおすすめから、登録していないチャンネルの動画だけ（速さ優先）
+  //   ・見終わった動画は出さない。「更新」では、最近出したものを後ろへ回す
+  async function loadRecHome(my, first) {
+    rec.loading = true;
+    let added = 0, pages = 0;
+    try {
+      if (!first) status('おすすめを読み込み中…');
+      const seen = new Set(rec.items.map(x => x.v));
+      while (pages++ < 4 && added < 24) {
+        const r = await YTAPI.recommended(first && pages === 1 ? null : rec.token, ctl.signal);
+        if (my !== run) return;
+        rec.token = r.token;
+        const fresh = [], old = [];
+        for (const x of r.items) {
+          if (!x.chKey || x.short || x.p === undefined || seen.has(x.v) || (watched[x.v]?.p || 0) >= WATCHED) continue;
+          if (rec.fav.has(x.chKey) || (x.chId && rec.fav.has('channel/' + x.chId))) continue; // 登録済みは除外
+          seen.add(x.v);
+          const it = { v: x.v, t: x.t, p: x.p, n: x.n, th: x.thumb, d: x.dur || 0, live: x.live, up: x.upcoming, w: x.w || 0, ch: { key: x.chKey, name: x.chName, unsub: true } };
+          (rec.blocked?.has(x.v) ? old : fresh).push(it);
+        }
+        rec.items.push(...fresh, ...old);
+        added += fresh.length + old.length;
+        showSoFar(my, first);
+        if (!r.token) { rec.vmode = 'end'; break; }
+      }
+      rec.at = Date.now();
+    } catch (e) {
+      if (my === run && !ctl.signal.aborted) status('おすすめの取得に失敗しました：' + e.message);
+    } finally { rec.loading = false; }
+    if (my !== run) return;
+    markRecSeen(rec.items);
+    if (first && !rec.painted) paint(rec.items, '');
+    else { items = rec.items; status(recHasMore() ? '' : 'これ以上のおすすめは見つかりませんでした（「更新」で読み直せます）'); afterLoad(); }
+    if (first && !rec.items.length) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">未登録チャンネルのおすすめが見つかりませんでした。しばらくしてから「更新」してください。</div>';
+  }
+
   async function loadRec(my, first) {
     if (rec.kind === 'video') {
       if (first) { await loadRecSeen(); rec.blocked = new Set(recSeen.keys()); }
-      return loadRecVideo(my, first);
+      return loadRecHome(my, first); // （検索・関連動画を混ぜる loadRecVideo は、いったん使わない）
     }
     rec.loading = true;
     let added = 0, tries = 0;
@@ -1070,6 +1151,7 @@ const TGFeed = (() => {
       return lockScreen(f ? TG.pathName(S.folders, f) : '未分類');
     }
     if (curType === 'later') return paintLater(S, my, force);
+    if (curType === 'bm') return paintBm(S);
     if (curType === 'new') return paintNew(S, my, force);
     if (curType === 'rec') {
       if (S.recMode === 'search') return startSearch(S, my, force);

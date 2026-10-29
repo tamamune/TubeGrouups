@@ -998,6 +998,9 @@ const TGManager = (() => {
         const r = await chrome.runtime.sendMessage({ type: 'tg-notify-test', level: el.dataset.lv });
         return setProgress(r?.ok ? 'テスト通知を出しました' : 'テスト通知を出せませんでした');
       }
+      case 'pickset':
+        await chrome.storage.local.set({ pickMode: el.dataset.v });
+        return openCommentCfg();
       case 'cmtset': {
         const { cmt = {} } = await chrome.storage.local.get('cmt');
         await chrome.storage.local.set({ cmt: { ...cmt, [el.dataset.k]: el.dataset.k === 'speed' ? +el.dataset.v : el.dataset.v } });
@@ -1312,7 +1315,7 @@ const TGManager = (() => {
   }
 
   // ---------- 設定（右上の ⚙）：バックアップ・同期／振り分け補助／コメント ----------
-  const SET_TABS = [['backup', '☁ 同期・バックアップ'], ['notify', '🔔 通知'], ['focus', '🎯 集中モード'], ['assist', '🪄 振り分け'], ['cmt', '💬 コメント']];
+  const SET_TABS = [['backup', '☁ 同期・バックアップ'], ['notify', '🔔 通知'], ['focus', '🎯 集中モード'], ['assist', '🪄 振り分け'], ['cmt', '💬 再生画面']];
   // ---------- 集中モードの設定 ----------
   const DAYS = ['日', '月', '火', '水', '木', '金', '土'];
   async function openFocusCfg() {
@@ -1467,6 +1470,7 @@ const TGManager = (() => {
   async function openCommentCfg() {
     const DEF = { side: 'right', speed: 2, width: 'normal', sort: 'top', end: 'hide', mode: 'cmt' };
     const cfg = { ...DEF, ...((await chrome.storage.local.get('cmt')).cmt || {}) };
+    const pick = (await chrome.storage.local.get('pickMode')).pickMode || 'auto';
     const row = (label, key, opts) => `<div class="cm-row"><span>${label}</span><div class="cm-seg">${opts.map(([v, t]) =>
       `<button data-act="cmtset" data-k="${key}" data-v="${v}" class="${String(cfg[key]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div></div>`;
     showPop(setAnchor(), settingsShell('cmt', `<div class="bk">
@@ -1478,6 +1482,11 @@ const TGManager = (() => {
       ${row('幅', 'width', [['narrow', '狭い'], ['normal', '普通'], ['wide', '広い']])}
       ${row('並び', 'sort', [['top', '評価順'], ['new', '新しい順']])}
       ${row('最後まで流れたら', 'end', [['hide', '隠す'], ['loop', 'ループ'], ['stay', 'そのまま']])}
+      <div class="bk-h" style="margin-top:16px">⏭ 次に見る動画</div>
+      <p class="bk-note">動画が終わる30秒前に4本出します。1本目は連続再生・YouTubeの再生リストの次の動画、2本目からはTubeFolioの「後で見る」からランダム（無ければYouTubeのおすすめ）。</p>
+      <div class="cm-row"><span>出す場面</span><div class="cm-seg">${[['auto', '連続再生・再生リストのとき'], ['always', 'いつも'], ['off', '出さない']].map(([v, t]) => `<button data-act="pickset" data-v="${v}" class="${pick === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      <div class="bk-h" style="margin-top:16px">🔖 ブックマーク</div>
+      <p class="bk-note">再生中に <b>B</b> キーを押すと、その瞬間の時間を保存します（サイドバーの「ブックマーク」で一覧）。</p>
     </div>`), SET_OPTS);
   }
 
