@@ -98,3 +98,4 @@ body.ryd .ryd-col { display: table-cell; }
 .src-yt { font-size: 10px; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, #8b6cff 30%, transparent); border: 1px solid #8b6cff; color: var(--fg); line-height: 16px; }
 .more[hidden], [hidden] { display: none !important; }
 .errbox { background: #ef535022; border: 1px solid #ef5350; color: var(--fg); padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; font-size: 13px; }
+.logo-img { width: 30px; height: 30px; display: block; }

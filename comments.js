@@ -5,7 +5,9 @@ const TGComments = (() => {
   const SPEED = { 1: 18, 2: 36, 3: 70 };          // 1秒あたりのスクロール量(px)
   const WIDTH = { narrow: 22, normal: 30, wide: 40 }; // 動画の幅に対する割合(%)
   const esc = TG.esc;
-  let cfg = { side: 'right', speed: 2, width: 'normal', sort: 'top', end: 'hide' };
+  // mode: 'cmt'＝コメント ／ 'tr'＝文字起こし（動画の再生位置に合わせて流れる）
+  let cfg = { side: 'right', speed: 2, width: 'normal', sort: 'top', end: 'hide', mode: 'cmt' };
+  let segs = null, segIdx = -1;
   let vid = null, token = null, loading = false, ctl = null, raf = 0, last = 0, hover = false, userUntil = 0, ended = false, acc = 0;
   let panel = null, list = null, btn = null, menu = null;
 
@@ -14,7 +16,7 @@ const TGComments = (() => {
     if (!ch.cmt) return;
     const old = cfg;
     cfg = { ...cfg, ...(ch.cmt.newValue || {}) };
-    if (old.sort !== cfg.sort) vid = null; // 並び順が変わったら取り直す
+    if (old.sort !== cfg.sort || old.mode !== cfg.mode) vid = null; // 並び順・内容が変わったら取り直す
     if (old.end !== cfg.end) panel?.classList.remove('tg-c-done');
     sync();
   });
@@ -102,7 +104,8 @@ const TGComments = (() => {
     stopEvents(menu);
     const row = (label, key, opts) => `<div class="tg-c-row"><span>${label}</span><div>${opts.map(([v, t]) =>
       `<button data-k="${key}" data-v="${v}" class="${String(cfg[key]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div></div>`;
-    menu.innerHTML = row('表示', 'side', [['right', '右側'], ['left', '左側'], ['off', 'オフ']]) +
+    menu.innerHTML = row('内容', 'mode', [['cmt', 'コメント'], ['tr', '文字起こし']]) +
+      row('表示', 'side', [['right', '右側'], ['left', '左側'], ['off', 'オフ']]) +
       row('速さ', 'speed', [[1, '遅い'], [2, '普通'], [3, '速い']]) +
       row('幅', 'width', [['narrow', '狭い'], ['normal', '普通'], ['wide', '広い']]) +
       row('並び', 'sort', [['top', '評価順'], ['new', '新しい順']]) +
@@ -124,8 +127,10 @@ const TGComments = (() => {
     vid = v;
     ctl?.abort();
     ctl = new AbortController();
-    token = null; ended = false; loading = true; endAt = 0;
+    token = null; ended = false; loading = true; endAt = 0; segs = null; segIdx = -1;
     panel?.classList.remove('tg-c-done');
+    panel?.classList.toggle('tg-c-tr', cfg.mode === 'tr');
+    if (cfg.mode === 'tr') return loadTr(v);
     list.innerHTML = '<div class="tg-c-pad"></div><div class="tg-c-note">コメントを読み込み中…</div>';
     list.scrollTop = 0;
     try {
@@ -198,11 +203,67 @@ const TGComments = (() => {
     if (idleT) return;
     idleT = setTimeout(() => { idleT = null; if (list && !raf) raf = requestAnimationFrame(tick); }, 500);
   }
+  // ---------- 文字起こし ----------
+  async function loadTr(v) {
+    list.innerHTML = '<div class="tg-c-pad"></div><div class="tg-c-note">文字起こしを読み込み中…</div>';
+    list.scrollTop = 0;
+    try {
+      const r = await YTAPI.transcript(v, ctl.signal);
+      if (v !== vid) return;
+      list.querySelector('.tg-c-note')?.remove();
+      if (!r?.length) { list.insertAdjacentHTML('beforeend', '<div class="tg-c-note">この動画には文字起こし（字幕）がありません</div>'); ended = true; return; }
+      segs = r;
+      const mm = s => { s = Math.floor(s); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+      list.insertAdjacentHTML('beforeend', r.map((x, i) => `<div class="tg-c-item tg-tr" data-i="${i}" data-s="${x.s}"><span class="tg-tr-time">${mm(x.s)}</span><span class="tg-c-text">${esc(x.t)}</span></div>`).join('') + '<div class="tg-c-pad tg-c-tail"></div>');
+      const h = list.clientHeight;
+      list.querySelectorAll('.tg-c-pad').forEach(p => { p.style.height = h + 'px'; });
+      ended = true;
+    } catch (e) {
+      if (!ctl.signal.aborted && v === vid) { list.querySelector('.tg-c-note')?.remove(); list.insertAdjacentHTML('beforeend', '<div class="tg-c-note">文字起こしを読み込めませんでした</div>'); }
+    } finally { loading = false; }
+  }
+  // 今の再生位置の行を、表示エリアの下から3分の1あたりに来るようにゆっくり合わせる
+  function tickTr(dt) {
+    const v = video();
+    if (!v || !segs) return false;
+    let i = segIdx;
+    const now = v.currentTime;
+    if (i < 0 || segs[i].s > now || (segs[i + 1] && segs[i + 1].s <= now)) {
+      i = segs.findIndex((x, k) => x.s <= now && (!segs[k + 1] || segs[k + 1].s > now));
+      if (i !== segIdx) {
+        list.querySelector('.tg-tr.cur')?.classList.remove('cur');
+        list.querySelector(`.tg-tr[data-i="${i}"]`)?.classList.add('cur');
+        segIdx = i;
+      }
+    }
+    const row = i >= 0 ? list.querySelector(`.tg-tr[data-i="${i}"]`) : list.querySelector('.tg-c-pad');
+    if (!row) return false;
+    const target = Math.max(0, row.offsetTop - list.clientHeight * 0.66);
+    const diff = target - list.scrollTop;
+    if (Math.abs(diff) > list.clientHeight * 2) { list.scrollTop = target; return true; } // シークしたときは一気に
+    if (Math.abs(diff) >= 1) { list.scrollTop += diff * Math.min(1, dt / 400); return true; }
+    return false;
+  }
+  // 文字起こしの行を押すと、その位置へ
+  document.addEventListener('click', e => {
+    const r = e.target.closest?.('.tg-tr');
+    if (!r || !panel?.contains(r)) return;
+    const v = video();
+    if (v) { v.currentTime = +r.dataset.s; userUntil = 0; }
+  });
+
   function tick(t) {
     raf = requestAnimationFrame(tick);
     const dt = last ? Math.min(100, t - last) : 16;
     last = t;
     if (!list || document.hidden) return;
+    if (cfg.mode === 'tr') {
+      const v = video();
+      if (!v || hover || t < userUntil) { idle(); return; }
+      const moved = tickTr(dt);
+      if (v.paused && !moved) idle(); // 止めている間は休む（シークすると0.5秒以内に追いつく）
+      return;
+    }
     const v = video();
     const playing = v && !v.paused && !v.ended;
     if (!playing || hover || t < userUntil) { idle(); return; }

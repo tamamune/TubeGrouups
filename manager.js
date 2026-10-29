@@ -374,12 +374,13 @@ const TGManager = (() => {
     const sy = st.sync || {};
     let drv = '';
     if (sy.connected) {
-      if (sy.lastError && (sy.lastErrorAt || 0) > (sy.lastSyncAt || 0)) drv = ' ／ Drive：保存できていません';
+      if (sy.needReauth) drv = ' ／ Drive：再接続が必要（⚙）';
+      else if (sy.lastError && (sy.lastErrorAt || 0) > (sy.lastSyncAt || 0)) drv = ' ／ Drive：保存できていません';
       else if (st.savedAt && sy.syncedSavedAt === st.savedAt) drv = ' ／ Drive保存済み';
       else drv = ' ／ Driveへ保存待ち';
     }
     q('.status').textContent = (st.saving ? '保存中…' : st.savedAt ? `自動保存済み・${fmt(st.savedAt)}` : '') + drv;
-    q('.status').classList.toggle('warn', drv.includes('できていません'));
+    q('.status').classList.toggle('warn', drv.includes('できていません') || drv.includes('再接続'));
     q('.ref').textContent = abort ? '取得を中止' : '更新情報を取得';
     q('.thumbsel').value = st.thumbMode;
     q('.cntsel').value = String(st.thumbCount);
@@ -410,13 +411,13 @@ const TGManager = (() => {
         ? `<button class="caret ${f.collapsed ? '' : 'open'}" data-act="collapse" data-f="${f.id}" title="${f.collapsed ? '開く' : '閉じる'}">${I.caret}</button>`
         : '<span class="caret-sp"></span>';
       const ops = `<span class="ops">
-        <button class="fdot" data-act="palette" data-f="${f.id}" title="色を変更" style="background:${esc(f.color)}"></button>
+        <button class="fdot" data-act="palette" data-f="${f.id}" title="色・アイコンを変更" style="background:${esc(f.color)}"></button>
         <button data-act="notify" data-f="${f.id}" title="${st.notify.has(f.id) ? '新着通知をオフ' : '新着通知をオン'}">${st.notify.has(f.id) ? I.bellRing : I.bellOff}</button>
         <button data-act="subfolder" data-f="${f.id}" title="この中にフォルダを追加">${I.plus}</button>
         <button data-act="kw" data-f="${f.id}" title="振り分け補助のキーワード">${I.tag}</button>
         <button data-act="rename" data-f="${f.id}" title="名前を変更">${I.edit}</button>
         <button data-act="delfolder" data-f="${f.id}" title="フォルダを削除">${I.del}</button></span>`;
-      h += vi(f.id, `<span class="fi" style="color:${esc(f.color)}">${I.folder}</span>`, f.name + (st.notify.has(f.id) ? ' 🔔' : ''),
+      h += vi(f.id, `<span class="fi" style="color:${esc(f.color)}">${TG.iconHtml(f, I.folder)}</span>`, f.name + (st.notify.has(f.id) ? ' 🔔' : ''),
         count(TG.folderKeys(st.folders, f.id)), { depth, caret, ops, drag: true });
     }
     if (st.folders.length) h += '<div class="rootdrop">ここにドロップでトップ階層へ</div>';
@@ -624,7 +625,13 @@ const TGManager = (() => {
     useDict: true,    // キーワード未設定のフォルダは、フォルダ名から自動で作る
     fuzzy: true,      // ひらがな／カタカナ・全角／半角・大文字／小文字を区別しない
     useShorts: true,  // 動画が無いチャンネルはショートのタイトルを見る
-    subfolder: true   // 中のフォルダ（サブフォルダ）も候補にする
+    subfolder: true,  // 中のフォルダ（サブフォルダ）も候補にする
+    useDesc: true,    // 動画の概要欄・チャンネルの説明も見る
+    descScore: 1,     // 概要欄（1本）・説明文に入っている
+    descCount: 3,     // 見る概要欄の本数
+    useTr: false,     // 文字起こし（字幕）も見る（時間がかかる）
+    trScore: 1,       // 文字起こし（1本）に入っている
+    trCount: 1        // 見る文字起こしの本数
   };
   // 文字のゆれをそろえる（ｶﾀｶﾅ→カタカナ→ひらがな、全角英数→半角、小文字）
   const norm = t => {
@@ -646,22 +653,40 @@ const TGManager = (() => {
   const inAnyFolder = key => st.folders.some(f => f.keys.includes(key));
 
   // 候補：チャンネル名に含まれる＝nameScore点、最近の動画タイトルに含まれる＝1本につき titleScore点
+  // 候補：名前・タイトル・概要欄（＋チャンネルの説明）・文字起こしにキーワードが何回出るかで点数
+  const normCache = new Map();
+  function textsOf(c) {
+    const R = st.rules, e = st.titles[c.key] || {};
+    const sig = [e.at, R.fuzzy, R.titleCount, R.useDesc, R.descCount, R.useTr, R.trCount].join('|');
+    const hit = normCache.get(c.key);
+    if (hit && hit.sig === sig) return hit;
+    const o = {
+      sig, name: norm(c.name),
+      titles: (e.t || []).slice(0, R.titleCount).map(norm),
+      descs: R.useDesc ? [...(e.d || []).slice(0, R.descCount), e.cd || ''].filter(Boolean).map(norm) : [],
+      trs: R.useTr ? (e.tr || []).slice(0, R.trCount).filter(Boolean).map(norm) : []
+    };
+    normCache.set(c.key, o);
+    return o;
+  }
   function suggest(c) {
     const R = st.rules;
-    const name = norm(c.name);
-    const titles = (st.titles[c.key]?.t || []).slice(0, R.titleCount).map(norm);
-    const all = [name, ...titles];
+    const { name, titles, descs, trs } = textsOf(c);
+    const all = [name, ...titles, ...descs, ...trs];
     const res = [];
     for (const f of st.folders) {
       if (!R.subfolder && f.parent) continue;
       const { inc, exc } = kwOf(f);
       if (exc.some(k => all.some(t => t.includes(k)))) continue;
-      let sc = 0;
+      const by = { n: 0, t: 0, d: 0, r: 0 };
       for (const k of inc) {
-        if (name.includes(k)) sc += R.nameScore;
-        sc += titles.filter(t => t.includes(k)).length * R.titleScore;
+        if (name.includes(k)) by.n += R.nameScore;
+        by.t += titles.filter(t => t.includes(k)).length * R.titleScore;
+        by.d += descs.filter(t => t.includes(k)).length * R.descScore;
+        by.r += trs.filter(t => t.includes(k)).length * R.trScore;
       }
-      if (sc >= R.minScore && sc > 0) res.push({ f, sc });
+      const sc = by.n + by.t + by.d + by.r;
+      if (sc >= R.minScore && sc > 0) res.push({ f, sc, by });
     }
     return res.sort((a, b) => b.sc - a.sc).slice(0, R.maxSugg);
   }
@@ -690,6 +715,13 @@ const TGManager = (() => {
       ${chk('fuzzy', 'ひらがな／カタカナ・全角／半角・大文字／小文字を区別しない')}
       ${chk('useShorts', '動画が無いチャンネルはショートのタイトルを見る')}
       ${chk('subfolder', '中のフォルダ（サブフォルダ）も候補にする')}
+      <div class="bk-sub">概要欄・文字起こし</div>
+      ${chk('useDesc', '動画の概要欄とチャンネルの説明文も見る')}
+      ${num('descScore', '概要欄・説明文に入っている', 0, 20, '1本・1語につき')}
+      ${num('descCount', '見る概要欄の本数', 1, 10, '最近の動画から')}
+      ${chk('useTr', '動画の文字起こし（字幕）も見る<em>字幕がある動画だけ。1チャンネルごとに時間がかかります</em>')}
+      ${num('trScore', '文字起こしに入っている', 0, 20, '1本・1語につき')}
+      ${num('trCount', '見る文字起こしの本数', 1, 5, '最近の動画から')}
       <div class="bk-sub">フォルダごとのキーワード</div>
       <p class="bk-note">カンマ区切り。空欄なら薄く表示された自動のキーワードを使います。<b>-言葉</b> と書くと除外（例：<code>ゲーム, 実況, -ポケカ</code>）。</p>
       <div class="ar-kws">${folders || '<p class="bk-note">フォルダがありません</p>'}</div>
@@ -716,6 +748,7 @@ const TGManager = (() => {
     const diff = Object.fromEntries(Object.entries(st.rules).filter(([k, v]) => RULES_DEF[k] !== v));
     chrome.storage.local.set({ assistRules: diff });
     refreshSugg();
+    if (st.assist) observeSugg(); // 概要欄・文字起こしをオンにしたら、見えている行から取り直す
   }
   function refreshSugg() {
     $.querySelectorAll('.sugg').forEach(el => { const c = st.channels[el.dataset.k]; if (c) el.innerHTML = suggHtml(c); });
@@ -724,8 +757,8 @@ const TGManager = (() => {
   function suggHtml(c) {
     const has = !!st.titles[c.key];
     const list = suggest(c);
-    const chips = list.map(({ f, sc }) =>
-      `<button class="sg" data-act="accept" data-f="${f.id}" style="--c:${esc(f.color)}" title="一致度 ${sc}">＋${esc(TG.pathName(st.folders, f))}${sc >= st.rules.bulkMin * 1.5 ? ' ★' : ''}</button>`).join('');
+    const chips = list.map(({ f, sc, by }) =>
+      `<button class="sg" data-act="accept" data-f="${f.id}" style="--c:${esc(f.color)}" title="一致度 ${sc}（名前 ${by.n}・タイトル ${by.t}・概要欄 ${by.d}・字幕 ${by.r}）">＋${esc(TG.pathName(st.folders, f))}${sc >= st.rules.bulkMin * 1.5 ? ' ★' : ''}</button>`).join('');
     return `<span class="sg-lb">🪄 候補</span>${chips || `<span class="sg-none">${has ? '候補なし（🏷でフォルダのキーワードを足すと出やすくなります）' : '動画タイトルを確認中…'}</span>`}`;
   }
   function bulkPlan() {
@@ -758,7 +791,7 @@ const TGManager = (() => {
         suggIO.unobserve(en.target);
         const key = en.target.dataset.k;
         const e = st.titles[key];
-        if (!e || Date.now() - e.at > 14 * 864e5) { titleQ.push(key); pumpTitles(); }
+        if (!e || Date.now() - e.at > 14 * 864e5 || (st.rules.useDesc && !e.dv) || (st.rules.useTr && !e.trv)) { titleQ.push(key); pumpTitles(); }
       }
     }, { root: q('main'), rootMargin: '300px' });
     $.querySelectorAll('.sugg').forEach(x => suggIO.observe(x));
@@ -770,13 +803,29 @@ const TGManager = (() => {
       if (!c) continue;
       titleBusy++;
       (async () => {
-        let t = [];
+        let t = [], vids = [];
+        const R = st.rules;
+        const rec = { at: Date.now(), t };
         try {
           const id = await ensureId(c);
-          if (id) t = (await YTAPI.channelTab(id, 'video')).slice(0, 30).map(x => x.t).filter(Boolean);
-          if (!t.length && id && st.rules.useShorts) t = (await YTAPI.channelTab(id, 'short')).slice(0, 30).map(x => x.t).filter(Boolean);
-        } catch { /* 取れなければ名前だけで判定 */ }
-        st.titles[key] = { at: Date.now(), t };
+          if (id) vids = (await YTAPI.channelTab(id, 'video')).slice(0, 30);
+          if (!vids.length && id && R.useShorts) vids = (await YTAPI.channelTab(id, 'short')).slice(0, 30);
+          rec.t = vids.map(x => x.t).filter(Boolean);
+          // 概要欄・チャンネルの説明・文字起こし（設定でオンのとき）
+          const shrink = s => String(s || '').replace(/https?:\/\/\S+/g, ' ').replace(/\s+/g, ' ').slice(0, 3000);
+          if (R.useDesc) {
+            rec.dv = true;
+            rec.cd = id ? shrink(await YTAPI.channelDesc(id)) : '';
+            rec.d = [];
+            for (const v of vids.slice(0, R.descCount)) rec.d.push(shrink((await YTAPI.videoText(v.v)).desc));
+          }
+          if (R.useTr) {
+            rec.trv = true;
+            rec.tr = [];
+            for (const v of vids.filter(x => !x.short).slice(0, R.trCount)) rec.tr.push(String((await YTAPI.videoText(v.v, { transcript: true })).tr || '').slice(0, 8000));
+          }
+        } catch { /* 取れなければ取れた分だけで判定 */ }
+        st.titles[key] = rec;
         if (host) {
           const el = [...$.querySelectorAll('.sugg')].find(x => x.dataset.k === key);
           if (el) el.innerHTML = suggHtml(c);
@@ -863,8 +912,14 @@ const TGManager = (() => {
 
   function openPalette(btn, f) {
     const sw = PALETTE.map(c => `<button class="sw ${c === f.color ? 'cur' : ''}" data-act="pickcolor" data-c="${c}" style="background:${c}" title="${c}"></button>`).join('');
+    const ic = TG.ICON_SET.map(e => `<button class="ic ${e === f.icon && !f.iconImg ? 'cur' : ''}" data-act="pickicon" data-e="${esc(e)}">${e}</button>`).join('');
     showPop(btn, `<div class="pal-title">「${esc(f.name)}」の色</div><div class="pal">${sw}</div>
-      <label class="custom">カスタム <input type="color" value="${esc(/^#[0-9a-f]{6}$/i.test(f.color) ? f.color : '#888888')}"></label>`, { kind: 'palette', f: f.id });
+      <label class="custom">カスタム <input type="color" value="${esc(/^#[0-9a-f]{6}$/i.test(f.color) ? f.color : '#888888')}"></label>
+      <div class="pal-title">アイコン</div><div class="icons">${ic}</div>
+      <div class="ic-row"><input class="ic-text" maxlength="4" placeholder="絵文字・文字" value="${esc(f.iconImg ? '' : f.icon || '')}"><button data-act="pickicon-text">決定</button></div>
+      <div class="ic-row"><button data-act="pickicon-img">🖼 画像を選ぶ</button><button data-act="pickicon-none">標準に戻す</button></div>`, { kind: 'palette', f: f.id, wide: true });
+    const p = q('.pop');
+    p.querySelector('.ic-text').addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') p.querySelector('[data-act=pickicon-text]').click(); });
   }
 
   const notifIcon = (label, i) => /なし|オフ|none/i.test(label) ? I.bellOff : /すべて|all/i.test(label) || i === 0 ? I.bellRing : I.bell;
@@ -998,6 +1053,39 @@ const TGManager = (() => {
       case 'palette':
         if (st.pop?.kind === 'palette' && st.pop.f === f.id) return hidePop();
         return openPalette(el, f);
+      case 'pickicon': case 'pickicon-text': case 'pickicon-none': {
+        const pf = folder(st.pop?.f);
+        if (!pf) return hidePop();
+        delete pf.iconImg;
+        if (act === 'pickicon') pf.icon = el.dataset.e;
+        if (act === 'pickicon-text') { const v = q('.pop .ic-text').value.trim(); if (v) pf.icon = v; else delete pf.icon; }
+        if (act === 'pickicon-none' || pf.icon === '📁') delete pf.icon;
+        persist(); renderAside(); renderList();
+        return hidePop();
+      }
+      case 'pickicon-img': {
+        const pf = folder(st.pop?.f);
+        if (!pf) return;
+        const inp = document.createElement('input');
+        inp.type = 'file'; inp.accept = 'image/*';
+        inp.addEventListener('change', async () => {
+          const file = inp.files[0];
+          if (!file) return;
+          try {
+            // 64×64 に縮めて保存（Drive同期でも軽いように）
+            const bmp = await createImageBitmap(file);
+            const c = document.createElement('canvas'); c.width = c.height = 64;
+            const g = c.getContext('2d');
+            const s = Math.min(bmp.width, bmp.height);
+            g.drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, 64, 64);
+            pf.iconImg = c.toDataURL('image/png');
+            delete pf.icon;
+            persist(); renderAside(); renderList(); hidePop();
+          } catch (e) { setProgress('画像を読み込めませんでした：' + e.message); }
+        });
+        inp.click();
+        return;
+      }
       case 'pickcolor': {
         const pf = folder(st.pop?.f);
         if (pf) { pf.color = el.dataset.c; persist(); renderAside(); renderList(); }
@@ -1170,7 +1258,7 @@ const TGManager = (() => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     const d = new Date();
-    a.download = `TubeGroups-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
+    a.download = `TubeFolio-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
     q('.app').appendChild(a);
     a.click();
     a.remove();
@@ -1377,13 +1465,14 @@ const TGManager = (() => {
     return openBackup();
   }
   async function openCommentCfg() {
-    const DEF = { side: 'right', speed: 2, width: 'normal', sort: 'top', end: 'hide' };
+    const DEF = { side: 'right', speed: 2, width: 'normal', sort: 'top', end: 'hide', mode: 'cmt' };
     const cfg = { ...DEF, ...((await chrome.storage.local.get('cmt')).cmt || {}) };
     const row = (label, key, opts) => `<div class="cm-row"><span>${label}</span><div class="cm-seg">${opts.map(([v, t]) =>
       `<button data-act="cmtset" data-k="${key}" data-v="${v}" class="${String(cfg[key]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div></div>`;
     showPop(setAnchor(), settingsShell('cmt', `<div class="bk">
-      <div class="bk-h">💬 再生画面のコメント</div>
-      <p class="bk-note">動画の横にコメントを下から上へ流します。再生画面の操作バーの 💬 からも変えられます。設定はすべての動画で共通です。</p>
+      <div class="bk-h">💬 再生画面のコメント・文字起こし</div>
+      <p class="bk-note">動画の横にコメントを下から上へ流します。「文字起こし」にすると、字幕の文を再生位置に合わせて流します（行を押すとその位置へ）。再生画面の操作バーの 💬 からも変えられます。設定はすべての動画で共通です。</p>
+      ${row('内容', 'mode', [['cmt', 'コメント'], ['tr', '文字起こし']])}
       ${row('表示', 'side', [['right', '右側'], ['left', '左側'], ['off', 'オフ']])}
       ${row('速さ', 'speed', [[1, '遅い'], [2, '普通'], [3, '速い']])}
       ${row('幅', 'width', [['narrow', '狭い'], ['normal', '普通'], ['wide', '広い']])}
@@ -1417,6 +1506,7 @@ const TGManager = (() => {
           <div class="bk-row"><input class="cid" value="${esc(s.clientId)}"><button data-act="drv-saveid">保存</button></div></details>`;
     } else {
       drv = `<p class="bk-note">接続済み・${last}${s.lastError ? `<br><span class="bk-err">${esc(s.lastError)}</span>` : ''}</p>
+        ${s.needReauth ? `<div class="bk-row"><button class="primary" data-act="drv-connect">${I.cloud}<span>Google Drive に再接続</span></button></div><p class="bk-note">Googleの認証の期限が切れました。押すとGoogleの画面が開きます（同じアカウントを選んでください）。</p>` : ''}
         <label class="bk-check"><input type="checkbox" class="drv-auto" ${s.auto ? 'checked' : ''}> 自動で同期する（変更を随時保存・開いたときに新しい方へ合わせる）</label>
         <details class="acc" ${st.accOpen ? 'open' : ''}><summary>Driveに保存するもの<small>（フォルダとチャンネルの振り分けは常に保存）</small></summary>
         ${chk('drv-meta', 'includeMeta', '更新情報（最終投稿日など）', size.meta)}
@@ -1748,6 +1838,14 @@ const TGManager = (() => {
   .bk-item small{color:var(--muted)}
   .bk-item button{padding:4px 10px;font-size:12px;flex:none}
   .pop.wide{max-height:80vh;overflow-y:auto}
+  .icons{display:grid;grid-template-columns:repeat(10,1fr);gap:3px;margin:4px 0 8px}
+  .icons .ic{padding:0;width:32px;height:32px;justify-content:center;border-radius:8px;font-size:18px;border:1px solid transparent;background:transparent}
+  .icons .ic:hover{background:var(--card2)}
+  .icons .ic.cur{border-color:var(--accent);background:var(--card2)}
+  .ic-row{display:flex;gap:6px;margin-top:6px}
+  .ic-row input{flex:1;min-width:0;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font:inherit}
+  .tg-ficon-emo{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;font-size:16px;line-height:1}
+  .tg-ficon-img{width:20px;height:20px;border-radius:5px;object-fit:cover;display:block}
   .fc-slots{display:flex;flex-direction:column;gap:8px;margin:6px 0}
   .fc-slot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid var(--line);border-radius:10px}
   .fc-days{display:flex;gap:3px}

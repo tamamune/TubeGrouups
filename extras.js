@@ -17,8 +17,8 @@ const TGX = (() => {
     if (now - checkLock < 90e3) return { busy: true }; // 他のタブが確認中
     await chrome.storage.local.set({ checkLock: now });
     try {
-      const list = await YTAPI.subsFeed({ maxPages: 4, maxAge: NEW_DAYS * 864e5 });
-      const recent = list.slice(0, 400).map(x => ({ v: x.v, t: x.t, p: x.p, k: x.chKey, id: x.chId, n: x.chName, w: x.w || 0, live: !!x.live, ...(x.upcoming ? { up: x.upcoming } : {}) }));
+      const list = await YTAPI.subsFeed({ maxPages: 8, maxAge: NEW_DAYS * 864e5 });
+      const recent = list.slice(0, 900).map(x => ({ v: x.v, t: x.t, p: x.p, d: x.dur || 0, k: x.chKey, id: x.chId, n: x.chName, w: x.w || 0, live: !!x.live, ...(x.upcoming ? { up: x.upcoming } : {}) }));
       await chrome.storage.local.set({ recent, lastCheckAt: Date.now() });
       await notifyNew(recent);
       TG.log('新着', `登録チャンネルの新着を確認：直近${NEW_DAYS}日 ${recent.length}本${force ? '（手動）' : ''}`);
@@ -184,13 +184,13 @@ const TGX = (() => {
       laterRemoved[it.v] = Date.now();
       await chrome.storage.local.set({ laterRemoved });
     }
-    else later.unshift({ v: it.v, t: it.t, p: it.p || 0, th: it.th || '', n: it.n || 0, ...(it.list ? { list: it.list } : {}), ...(it.short ? { short: true } : {}), ch: { key: it.ch?.key || '', name: it.ch?.name || '', unsub: !!it.ch?.unsub }, at: Date.now() });
+    else later.unshift({ v: it.v, t: it.t, p: it.p || 0, th: it.th || '', n: it.n || 0, ...(it.d ? { d: it.d } : {}), ...(it.list ? { list: it.list } : {}), ...(it.short ? { short: true } : {}), ch: { key: it.ch?.key || '', name: it.ch?.name || '', unsub: !!it.ch?.unsub }, at: Date.now() });
     await chrome.storage.local.set({ later: later.slice(0, 1000) });
     TG.log('後で見る', `${i < 0 ? '追加' : '外す'}：${it.t || it.v}（計 ${Math.min(later.length, 1000)}本）`);
     return i < 0;
   }
 
-  // YouTube本体の「後で見る」から取り込む（TubeGroupsの一覧から外したものは除く）
+  // YouTube本体の「後で見る」から取り込む（TubeFolioの一覧から外したものは除く）
   async function importWatchLater() {
     const list = await YTAPI.watchLater();
     const later = await getLater();
@@ -211,9 +211,10 @@ const TGX = (() => {
   }
 
   // ---------- 連続再生 ----------
-  async function startQueue(items, title) {
+  // opts.pick … 動画の終わりの20秒前に、続きの候補（4本）を出して選べるようにする
+  async function startQueue(items, title, opts = {}) {
     if (!items.length) return false;
-    await chrome.storage.local.set({ queue: { title, items: items.map(x => ({ v: x.v, t: x.t })), i: 0, at: Date.now() } });
+    await chrome.storage.local.set({ queue: { title, items: items.slice(0, 300).map(x => ({ v: x.v, t: x.t, ch: x.ch?.name || '', d: x.d || 0 })), i: 0, at: Date.now(), pick: !!opts.pick } });
     location.assign('/watch?v=' + encodeURIComponent(items[0].v));
     return true;
   }
@@ -275,15 +276,56 @@ const TGX = (() => {
     renderQueue();
   }
 
-  // 動画が最後まで再生されたら次へ（広告の終了は無視）
+  // 動画が最後まで再生されたら次へ（広告の終了は無視）。候補から選んでいればその動画へ
+  let picked = null;
   document.addEventListener('ended', e => {
     if (e.target.tagName !== 'VIDEO' || !Q) return;
     if (document.querySelector('#movie_player.ad-showing, .ad-showing')) return;
     const idx = Q.items.findIndex(x => x.v === curVid());
     if (idx < 0) return;
+    if (picked != null) { const p = picked; picked = null; go(p); return; }
     if (idx >= Q.items.length - 1) { stopQueue(); return; }
     go(idx + 1);
   }, true);
+
+  // ---------- 終わる前に「次の候補」4本（後で見るの中から） ----------
+  //   1本目＝次の動画（このまま待つと自動で再生）、残り3本＝後の方からランダム
+  let pickFor = null;
+  document.addEventListener('timeupdate', e => {
+    const vEl = e.target;
+    if (vEl.tagName !== 'VIDEO' || !Q?.pick) return;
+    if (document.querySelector('#movie_player.ad-showing')) return;
+    const v = curVid();
+    const idx = Q.items.findIndex(x => x.v === v);
+    if (idx < 0 || idx >= Q.items.length - 1) return;
+    const left = (vEl.duration || 0) - vEl.currentTime;
+    if (!vEl.duration || !isFinite(left)) return;
+    if (left <= 20 && left > 0.5 && pickFor !== v) { pickFor = v; showPicker(idx); }
+    if (left > 25 && pickFor === v) { pickFor = null; document.getElementById('tg-pick')?.remove(); }
+  }, true);
+  function showPicker(idx) {
+    document.getElementById('tg-pick')?.remove();
+    const player = document.querySelector('#movie_player');
+    if (!player) return;
+    const rest = Q.items.map((x, i) => ({ ...x, i })).slice(idx + 1);
+    const next = rest[0];
+    const others = rest.slice(1).sort(() => Math.random() - 0.5).slice(0, 3);
+    const list = [next, ...others].filter(Boolean);
+    const dur = s => { s = Math.round(s || 0); if (!s) return ''; const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0'); };
+    const box = document.createElement('div');
+    box.id = 'tg-pick';
+    box.innerHTML = `<div class="tg-pk-h"><b>次に見る動画</b><span>（${esc(Q.title)}から・選ばなければ「次」を自動で再生）</span><button class="tg-pk-x" title="閉じる">✕</button></div>
+      <div class="tg-pk-list">${list.map((x, k) => `<button class="tg-pk-item ${k === 0 ? 'next' : ''}" data-i="${x.i}">
+        <span class="tg-pk-th"><img src="https://i.ytimg.com/vi/${esc(x.v)}/mqdefault.jpg" alt="">${x.d ? `<i>${dur(x.d)}</i>` : ''}${k === 0 ? '<em>次</em>' : ''}</span>
+        <span class="tg-pk-t">${esc(x.t || '')}</span><span class="tg-pk-c">${esc(x.ch || '')}</span></button>`).join('')}</div>`;
+    ['click', 'dblclick', 'mousedown', 'mouseup', 'keydown'].forEach(t => box.addEventListener(t, ev => ev.stopPropagation()));
+    box.addEventListener('click', ev => {
+      if (ev.target.closest('.tg-pk-x')) { box.remove(); return; }
+      const b = ev.target.closest('.tg-pk-item');
+      if (b) go(+b.dataset.i);
+    });
+    player.appendChild(box);
+  }
 
   return { importWatchLater, importHistory, check, newCounts, markSeen, getLater, toggleLater, startQueue, syncQueue, renderQueue, stopQueue };
 })();

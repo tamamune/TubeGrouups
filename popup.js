@@ -13,7 +13,7 @@ async function goYouTube(forceSubs) {
   window.close();
 }
 
-function row(label, count, color, id, active) {
+function row(label, count, color, id, active, f) {
   const li = document.createElement('li');
   li.className = active ? 'active' : '';
   const dot = document.createElement('span');
@@ -25,6 +25,7 @@ function row(label, count, color, id, active) {
   const c = document.createElement('span');
   c.className = 'count';
   c.textContent = count;
+  if (f && (f.icon || f.iconImg)) { dot.style.background = 'none'; dot.innerHTML = TG.iconHtml(f); dot.classList.add('ic'); }
   li.append(dot, name, c);
   li.addEventListener('click', async () => {
     await TG.setActive(id);
@@ -37,7 +38,7 @@ function row(label, count, color, id, active) {
   const { folders, activeGroup } = await TG.load();
   const list = document.getElementById('list');
   list.appendChild(row('すべて', '', '#888', null, !activeGroup));
-  TG.tree(folders).forEach(({ f }) => list.appendChild(row("　".repeat(TG.tree(folders).find(x => x.f === f)?.depth || 0) + f.name, TG.folderKeys(folders, f.id).size, f.color, f.id, activeGroup === f.id)));
+  TG.tree(folders).forEach(({ f }) => list.appendChild(row("　".repeat(TG.tree(folders).find(x => x.f === f)?.depth || 0) + f.name, TG.folderKeys(folders, f.id).size, f.color, f.id, activeGroup === f.id, f)));
   document.getElementById('empty').hidden = folders.length > 0;
   document.getElementById('stats').addEventListener('click', () => { chrome.tabs.create({ url: chrome.runtime.getURL('stats.html') }); window.close(); });
   document.getElementById('log').addEventListener('click', () => { chrome.runtime.sendMessage({ type: 'openPage', page: 'log' }); window.close(); });

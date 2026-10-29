@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "TubeGroups",
-  "version": "4.15.0",
-  "description": "YouTubeの登録チャンネルをフォルダ分けして、登録チャンネルフィードをグループ別に表示します。",
+  "name": "TubeFolio",
+  "version": "4.21.0",
+  "description": "YouTubeの登録チャンネルをフォルダで整理。フォルダ別の新着・動画・ライブ・ショート一覧、通知、集中モード、視聴記録。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArZ9eZ9HEFkTJX1DwJ9zyfyjRsUM0B6ae/Ptg+Pcr10wUvyMPfy6CsRxWTPUViflqOAT8HxRoRwFomBZPpOiNYDG2pJgML71sEVr9wcHXcHzi42MBenNf4+41f3MqsCd6DOg0rjUYR7qqNEhzxTnOtTRZpZaAt1VRboHtKFKnwtCuN8vhWmqrRdX0+wA08IqQW9iPA+2HdFrnEsQEqy5z4s0aU24mdFXNTtFJoY3JKc1G7tDtOOmqdLmWWwif2EzIKLZVLewY4gdEaOKbhNGDwFxuMMei4RUiJasmvvSTnyYRGZ6DIvqAA1/NwkVI4phQMn8/3caNTMQd2lbLAasC3wIDAQAB",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -17,7 +18,7 @@
     "https://returnyoutubedislikeapi.com/*"
   ],
   "action": {
-    "default_title": "TubeGroups",
+    "default_title": "TubeFolio",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

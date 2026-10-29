@@ -6,6 +6,9 @@
 //   activeGroup: null(すべて) / "__unsorted" / フォルダID
 //   feedType: "video" | "live" | "short"     cols: 3 | 4 | 5
 const TG = {
+  APP: 'TubeFolio',
+  // 名前を変える前に作ったバックアップ・Driveのファイルを読み込むためだけに使う旧名
+  LEGACY_APP: 'TubeGroups',
   // ---------- 動作ログ ----------
   // TG.log('カテゴリ', 'メッセージ', 'info'|'warn'|'error')
   // 保存はバックグラウンドだけが行う（同時書き込みで消えないように）。ページ側は2秒ごとにまとめて送る
@@ -173,11 +176,19 @@ const TG = {
     return !!fs?.length && fs.some(f => TG.folderLocked(F, folders, f.id));
   },
 
+  // ---------- フォルダのアイコン（絵文字 f.icon ／ 画像 f.iconImg）。無ければ fallback（標準のフォルダ） ----------
+  ICON_SET: ['📁', '🍜', '🍣', '🍖', '🍰', '☕', '🎮', '🕹', '🎵', '🎤', '🎸', '💃', '📺', '🎬', '🎨', '📚', '🎓', '💼', '💻', '📱', '🔧', '🚗', '✈️', '🏕', '🌏', '🗾', '🏠', '🐶', '🐱', '⚽', '⚾', '🏀', '💪', '👻', '😂', '❤️', '⭐', '🔥', '📰', '💡', '🤖', '🌸', '🎌', '🇰🇷', '🇺🇸', '🇨🇳', '🧪', '🪴'],
+  iconHtml(f, fallback = '') {
+    if (f?.iconImg && /^data:image\/(png|jpeg|webp|gif);base64,/.test(f.iconImg)) return `<img class="tg-ficon-img" src="${f.iconImg}" alt="">`;
+    if (f?.icon) return `<span class="tg-ficon-emo">${TG.esc(f.icon)}</span>`;
+    return fallback;
+  },
+
   COLORS: ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#1e88e5', '#8e24aa', '#ec407a', '#6d4c41', '#757575'],
 
   async load() {
-    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind, newOff, recMode, sFolder, sText } =
-      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind', 'newOff', 'recMode', 'sFolder', 'sText']);
+    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind, newOff, recMode, sFolder, sText, laterOff } =
+      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind', 'newOff', 'recMode', 'sFolder', 'sText', 'laterOff']);
     if (!folders && Array.isArray(groups)) {
       channels = {};
       folders = groups.map(g => {
@@ -202,7 +213,8 @@ const TG = {
       hideWatched: !!hideWatched,
       recKind: recKind === 'short' ? 'short' : 'video',
       recMode: recMode === 'search' ? 'search' : 'rec', sFolder: sFolder || '', sText: sText || '',
-      newOff: Array.isArray(newOff) ? newOff : [] // 新着動画で隠すカテゴリ（トップのフォルダID / '__unsorted'）
+      newOff: Array.isArray(newOff) ? newOff : [], // 新着動画で隠すカテゴリ（トップのフォルダID / '__unsorted'）
+      laterOff: Array.isArray(laterOff) ? laterOff : [] // 後で見るで隠すカテゴリ（＋ '__other'＝登録していないチャンネル）
     };
   },
 
@@ -213,7 +225,7 @@ const TG = {
   AUX: {
     history: ['history', 'daily', 'watched', 'ytHistSeen'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
     later: ['later', 'laterRemoved'],                      // 後で見る（外した記録も）
-    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'notifyRules', 'focus', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
+    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'notifyRules', 'focus', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
   },
 
   // opts: { meta, history, later, prefs }（省略時はすべて含める）
@@ -223,7 +235,7 @@ const TG = {
     const auxKeys = Object.entries(TG.AUX).filter(([k]) => inc(k)).flatMap(([, v]) => v);
     const d = await chrome.storage.local.get([...TG.SYNC_KEYS, ...auxKeys]);
     const out = {
-      app: 'TubeGroups', format: 3, exportedAt: Date.now(), savedAt: d.savedAt || Date.now(),
+      app: TG.APP, format: 3, exportedAt: Date.now(), savedAt: d.savedAt || Date.now(),
       channels: d.channels || {}, folders: d.folders || [],
       settings: { cols: d.cols, feedType: d.feedType, homeCols: d.homeCols, homeShortCols: d.homeShortCols, hideWatched: d.hideWatched },
       aux: {}
@@ -370,8 +382,8 @@ const TG = {
   },
 
   async importData(data) {
-    if (!data || data.app !== 'TubeGroups' || typeof data.channels !== 'object' || !Array.isArray(data.folders)) {
-      throw new Error('TubeGroupsのバックアップファイルではありません');
+    if (!data || ![TG.APP, TG.LEGACY_APP].includes(data.app) || typeof data.channels !== 'object' || !Array.isArray(data.folders)) {
+      throw new Error('TubeFolioのバックアップファイルではありません');
     }
     await TG.backup(data._reason || '読み込む前の状態');
     TG.log('データ', `読み込み：フォルダ ${data.folders.length}・チャンネル ${Object.keys(data.channels).length}（${data._reason || 'ファイル'}）`);

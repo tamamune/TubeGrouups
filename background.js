@@ -1,9 +1,10 @@
 // Google Drive 同期（バックグラウンド）
 // 認証: chrome.identity.launchWebAuthFlow（利用者が作成したOAuthクライアントIDを使用）
-// 保存先: マイドライブ直下の TubeGroups-sync.json（drive.file 権限＝この拡張が作ったファイルだけ触れる）
+// 保存先: マイドライブ直下の TubeFolio-sync.json（drive.file 権限＝この拡張が作ったファイルだけ触れる）
 importScripts('shared.js');
 
-const FILE = 'TubeGroups-sync.json';
+const FILE = 'TubeFolio-sync.json';
+const OLD_FILE = TG.LEGACY_APP + '-sync.json'; // 名前を変える前のファイル（見つけたら TubeFolio-sync.json に名前を変える）
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 async function getSync() {
@@ -22,23 +23,32 @@ async function token(interactive) {
   if (!s.clientId) throw new Error('クライアントIDが設定されていません');
   const { tok } = await chrome.storage.session.get('tok');
   if (tok && tok.exp > Date.now() + 60e3) return tok.value;
+  if (!interactive && s.needReauth && Date.now() - (s.needReauthAt || 0) < 30 * 60e3) throw new Error('再接続が必要です（⚙ →「同期・バックアップ」→「Google Drive に再接続」）');
+  // 裏で取り直すとき（1時間ごと・拡張機能の再読み込み後）は、接続したアカウントを指定する
+  //   （Googleアカウントが複数あると、指定しないと interaction_required になる）
   const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
     client_id: s.clientId,
     response_type: 'token',
     redirect_uri: chrome.identity.getRedirectURL(),
     scope: SCOPE,
-    ...(interactive ? {} : { prompt: 'none' })
+    ...(s.email ? { login_hint: s.email } : {}),
+    ...(interactive ? (s.email ? {} : { prompt: 'select_account' }) : { prompt: 'none' })
   });
   let res;
   try {
-    res = await chrome.identity.launchWebAuthFlow({ url, interactive });
+    res = await chrome.identity.launchWebAuthFlow({ url, interactive, ...(interactive ? {} : { abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: 15000 }) });
   } catch (e) {
-    throw new Error(interactive ? '認証がキャンセルされたか失敗しました' : '再ログインが必要です（「Driveに接続」を押してください）');
+    if (!interactive) await setSync({ needReauth: true, needReauthAt: Date.now() });
+    throw new Error(interactive ? '認証がキャンセルされたか失敗しました' : '再接続が必要です（⚙ →「同期・バックアップ」→「Google Drive に再接続」）');
   }
   const h = new URLSearchParams(new URL(res).hash.slice(1));
   const value = h.get('access_token');
-  if (!value) throw new Error('認証に失敗しました：' + (h.get('error') || '不明なエラー'));
+  if (!value) {
+    if (!interactive) await setSync({ needReauth: true, needReauthAt: Date.now() });
+    throw new Error('認証に失敗しました：' + (h.get('error') || '不明なエラー') + (interactive ? '' : '（⚙ →「同期・バックアップ」で再接続してください）'));
+  }
   await chrome.storage.session.set({ tok: { value, exp: Date.now() + (+h.get('expires_in') || 3600) * 1000 } });
+  if (s.needReauth) await setSync({ needReauth: false });
   return value;
 }
 
@@ -53,9 +63,17 @@ async function api(path, opt = {}, interactive = false) {
 }
 
 async function findFile(interactive) {
-  const q = encodeURIComponent(`name='${FILE}' and trashed=false`);
-  const r = await api(`/drive/v3/files?q=${q}&fields=files(id,modifiedTime,size)&orderBy=modifiedTime desc&spaces=drive`, {}, interactive);
-  return (await r.json()).files?.[0] || null;
+  const q = encodeURIComponent(`(name='${FILE}' or name='${OLD_FILE}') and trashed=false`);
+  const r = await api(`/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime,size)&orderBy=modifiedTime desc&spaces=drive`, {}, interactive);
+  const f = (await r.json()).files?.[0] || null;
+  if (f && f.name !== FILE) {
+    try {
+      await api(`/drive/v3/files/${f.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: FILE }) }, interactive);
+      TG.log('同期', `Driveのファイル名を ${FILE} に変更しました`);
+      f.name = FILE;
+    } catch (e) { TG.log('同期', 'Driveのファイル名を変えられませんでした：' + e.message, 'warn'); }
+  }
+  return f;
 }
 
 async function upload(data, interactive) {
@@ -220,8 +238,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       case 'connect': {
         TG.log('同期', 'Google Drive に接続');
         await chrome.storage.session.remove('tok');
-        await token(true);
-        await setSync({ connected: true, lastError: '' });
+        const t = await token(true);
+        // 次から裏で取り直すときに使うアカウント（Driveの情報から）
+        let email = '';
+        try { email = (await (await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + t } })).json())?.user?.emailAddress || ''; } catch { /* 取れなくても続ける */ }
+        await setSync({ connected: true, lastError: '', needReauth: false, ...(email ? { email } : {}) });
+        TG.log('同期', 'Google Drive に接続しました' + (email ? `（${email.replace(/(.{2}).*(@.*)/, '$1…$2')}）` : ''));
         const remote = await findFile(false);
         return { connected: true, hasRemote: !!remote };
       }
@@ -340,7 +362,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === 'tg-check-now') { askTabToCheck(true).then(reply); return true; }
   if (msg?.type === 'tg-hist-now') { askTab({ type: 'tg-hist' }).then(reply); return true; }
   if (msg?.type === 'tg-notify-test') {
-    deliver([{ v: 'dQw4w9WgXcQ', title: 'テスト通知です（クリックで動画を開きます）', ch: 'TubeGroups', folder: 'テスト', level: msg.level || 'normal', kind: msg.kind || 'new' }], 'テスト').then(() => reply({ ok: true }));
+    deliver([{ v: 'dQw4w9WgXcQ', title: 'テスト通知です（クリックで動画を開きます）', ch: 'TubeFolio', folder: 'テスト', level: msg.level || 'normal', kind: msg.kind || 'new' }], 'テスト').then(() => reply({ ok: true }));
     return true;
   }
   if (msg?.type !== 'tg-notify') return;
@@ -354,24 +376,31 @@ chrome.notifications.onClicked.addListener(id => {
 });
 
 // 視聴記録の画面を開く（すでに開いていればそのタブへ）
+// （chrome.tabs.query の url 指定は tabs 権限が無いと無視され、関係ないタブが選ばれてしまうので使わない）
+async function openOwnPage(file) {
+  const url = chrome.runtime.getURL(file);
+  try {
+    const ctx = await chrome.runtime.getContexts({ contextTypes: ['TAB'], documentUrls: [url] });
+    const c = ctx.find(x => x.tabId >= 0);
+    if (c) {
+      const tab = await chrome.tabs.update(c.tabId, { active: true });
+      if (tab?.windowId != null) chrome.windows.update(tab.windowId, { focused: true });
+      return;
+    }
+  } catch (e) { /* 古いChrome（getContexts なし）は新しいタブで開く */ }
+  await chrome.tabs.create({ url });
+  TG.log('拡張', `${file === 'log.html' ? '動作ログ' : '視聴記録'}の画面を開いた`);
+}
 chrome.runtime.onMessage.addListener(msg => {
   if (msg?.type !== 'openStats') return;
-  const url = chrome.runtime.getURL('stats.html');
-  chrome.tabs.query({ url }).then(tabs => {
-    if (tabs[0]) { chrome.tabs.update(tabs[0].id, { active: true }); chrome.windows.update(tabs[0].windowId, { focused: true }); }
-    else chrome.tabs.create({ url });
-  });
+  openOwnPage('stats.html').catch(e => TG.log('拡張', '視聴記録の画面を開けません：' + e.message, 'error'));
 });
 
 // ---------- 動作ログ ----------
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg?.type === 'tg-log') { TG.writeLog((msg.items || []).slice(0, 200)); return; }
   if (msg?.type !== 'openPage') return;
-  const url = chrome.runtime.getURL(msg.page === 'log' ? 'log.html' : 'stats.html');
-  chrome.tabs.query({ url }).then(tabs => {
-    if (tabs[0]) { chrome.tabs.update(tabs[0].id, { active: true }); chrome.windows.update(tabs[0].windowId, { focused: true }); }
-    else chrome.tabs.create({ url });
-  });
+  openOwnPage(msg.page === 'log' ? 'log.html' : 'stats.html').catch(e => TG.log('拡張', '画面を開けません：' + e.message, 'error'));
 });
 chrome.runtime.onInstalled.addListener(d => TG.log('拡張', d.reason === 'update' ? `更新しました（v${chrome.runtime.getManifest().version}）` : `インストール：${d.reason}`));
 chrome.runtime.onStartup.addListener(() => TG.log('拡張', 'ブラウザ起動'));

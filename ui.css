@@ -28,3 +28,6 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px Roboto, "N
 }
 
 .foot button.sub { margin-top: 6px; background: transparent; color: var(--fg); border: 1px solid var(--line); }
+.glist .dot.ic { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; }
+.glist .dot .tg-ficon-emo { font-size: 14px; line-height: 1; }
+.glist .dot .tg-ficon-img { width: 16px; height: 16px; border-radius: 4px; }

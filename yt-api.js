@@ -333,11 +333,12 @@ const YTAPI = (() => {
     walk(json, (k, v) => {
       cur = v;
       if (!v || typeof v !== 'object') return;
-      if (k === 'videoRenderer' || k === 'gridVideoRenderer' || k === 'playlistVideoRenderer') {
+      if (k === 'videoRenderer' || k === 'gridVideoRenderer' || k === 'playlistVideoRenderer' || k === 'compactVideoRenderer') {
         const badges = JSON.stringify(v.badges || []) + JSON.stringify(v.thumbnailOverlays || []);
         const run = (v.ownerText || v.longBylineText || v.shortBylineText)?.runs?.[0];
         push({
           ...chInfo(run?.navigationEndpoint?.browseEndpoint, run?.text),
+          src: k,
           v: v.videoId,
           t: text(v.title),
           ago: text(v.publishedTimeText),
@@ -638,21 +639,72 @@ const YTAPI = (() => {
   }
 
   // YouTube本体の「後で見る」再生リスト（最大 maxPages×100本）
-  async function watchLater({ maxPages = 10 } = {}, signal) {
+  // 再生リストの中身（id='WL' で後で見る）
+  async function playlistItems(id, { maxPages = 10 } = {}, signal) {
     const cfg = await getCfg();
     const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
     context.client = { ...(context.client || {}), hl: 'en' };
     const out = [];
     let token = null;
     for (let i = 0; i < maxPages; i++) {
-      const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId: 'VLWL' }, cfg, signal);
-      out.push(...parseTab(json));
-      token = lastToken(json);
+      const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId: 'VL' + id }, cfg, signal);
+      // 再生リストのページには「おすすめの動画」も付いてくるので、リスト本体（playlistVideoListRenderer）だけを見る
+      let scope = json;
+      if (!token) {
+        const nodes = [];
+        walk(json, (k, v) => { if (k === 'playlistVideoListRenderer' && v) nodes.push(v); });
+        if (nodes.length) scope = nodes;
+      }
+      const got = parseTab(scope);
+      const own = got.filter(x => x.src === 'playlistVideoRenderer');
+      out.push(...(own.length ? own : got));
+      token = lastToken(scope);
       if (!token) break;
     }
     const seen = new Set();
     return out.filter(x => x.v && !seen.has(x.v) && seen.add(x.v));
   }
+  // 自分の再生リストの一覧（ライブラリの「再生リスト」）
+  async function myPlaylists(signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const out = new Map();
+    const countOf = o => { const m = JSON.stringify(o || {}).match(/"(\d[\d,]*) (?:videos?|本の動画)"/); return m ? +m[1].replace(/,/g, '') : null; };
+    const grab = json => walk(json, (k, v) => {
+      if (!v || typeof v !== 'object') return;
+      if (k === 'lockupViewModel' && /PLAYLIST/.test(v.contentType || '') && v.contentId) {
+        out.set(v.contentId, { id: v.contentId, title: text(v.metadata?.lockupMetadataViewModel?.title), count: countOf(v.contentImage) });
+      } else if ((k === 'gridPlaylistRenderer' || k === 'playlistRenderer') && v.playlistId) {
+        out.set(v.playlistId, { id: v.playlistId, title: text(v.title), count: +(text(v.videoCountText || v.videoCountShortText).replace(/[^\d]/g, '')) || null });
+      }
+    });
+    for (const browseId of ['FEplaylist_aggregation', 'FElibrary']) {
+      try {
+        let token = null;
+        for (let i = 0; i < 4; i++) {
+          const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId }, cfg, signal);
+          grab(json);
+          token = lastToken(json);
+          if (!token) break;
+        }
+        if (out.size) break;
+      } catch (e) { if (signal?.aborted) throw e; }
+    }
+    out.delete('WL');
+    return [...out.values()].filter(p => p.title);
+  }
+  async function addToPlaylist(videoId, playlistId) {
+    const j = await call('browse/edit_playlist', { playlistId, actions: [{ action: 'ACTION_ADD_VIDEO', addedVideoId: videoId }] });
+    if (j?.status && j.status !== 'STATUS_SUCCEEDED') throw new Error(j.status);
+    return true;
+  }
+  async function removeFromPlaylist(videoId, playlistId) {
+    const j = await call('browse/edit_playlist', { playlistId, actions: [{ action: 'ACTION_REMOVE_VIDEO_BY_VIDEO_ID', removedVideoId: videoId }] });
+    if (j?.status && j.status !== 'STATUS_SUCCEEDED') throw new Error(j.status);
+    return true;
+  }
+  const watchLater = (opts = {}, signal) => playlistItems('WL', opts, signal);
 
   // YouTube本体の「後で見る」から削除
   async function removeFromWatchLater(videoId) {
@@ -689,5 +741,74 @@ const YTAPI = (() => {
     return { items: parseTab(json), token: lastToken(json) };
   }
 
-  return { search, shortsSequence, removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
+  // 登録チャンネルのフィード1ページ分（新着動画の続きの読み込み用）
+  async function subsPage(token, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const json = await innertube('browse', token ? { context, continuation: token } : { context, browseId: 'FEsubscriptions' }, cfg, signal);
+    return { items: parseTab(json).filter(x => x.chKey && x.p), token: lastToken(json) };
+  }
+
+  // 関連動画（再生画面の横に出るもの）。おすすめの続きの読み込みに使う
+  async function related(videoId, signal) {
+    const cfg = await getCfg();
+    const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
+    context.client = { ...(context.client || {}), hl: 'en' };
+    const json = await innertube('next', { context, videoId }, cfg, signal);
+    const sec = json?.contents?.twoColumnWatchNextResults?.secondaryResults || json;
+    return parseTab(sec).filter(x => x.v && x.v !== videoId);
+  }
+
+  // 動画の概要欄（と文字起こし）… 振り分け補助で使う
+  async function videoText(videoId, { transcript = false } = {}, signal) {
+    const cfg = await getCfg();
+    const out = { desc: '', tr: '' };
+    try {
+      const p = await innertube('player', { videoId }, cfg, signal);
+      out.desc = p?.videoDetails?.shortDescription || '';
+    } catch (e) { if (signal?.aborted) throw e; }
+    if (!transcript) return out;
+    try {
+      const n = await innertube('next', { videoId }, cfg, signal);
+      let params = null;
+      walk(n, (k, v) => { if (!params && k === 'getTranscriptEndpoint' && v?.params) params = v.params; });
+      if (params) {
+        const t = await innertube('get_transcript', { params }, cfg, signal);
+        const parts = [];
+        walk(t, (k, v) => {
+          if (k === 'transcriptSegmentRenderer' && v) parts.push(text(v.snippet));
+          else if (k === 'transcriptSegmentViewModel' && v) parts.push(text(v.simpleText || v.snippet));
+        });
+        out.tr = parts.join(' ').slice(0, 20000);
+      }
+    } catch (e) { if (signal?.aborted) throw e; }
+    return out;
+  }
+  // チャンネルの説明文
+  async function channelDesc(id, signal) {
+    try {
+      const j = await innertube('browse', { browseId: id }, await getCfg(), signal);
+      return j?.metadata?.channelMetadataRenderer?.description || '';
+    } catch (e) { if (signal?.aborted) throw e; return ''; }
+  }
+
+  // 文字起こし（時刻つき）：[{ s: 開始秒, e: 終了秒, t: 文 }]
+  async function transcript(videoId, signal) {
+    const cfg = await getCfg();
+    const n = await innertube('next', { videoId }, cfg, signal);
+    let params = null;
+    walk(n, (k, v) => { if (!params && k === 'getTranscriptEndpoint' && v?.params) params = v.params; });
+    if (!params) return null;
+    const t = await innertube('get_transcript', { params }, cfg, signal);
+    const out = [];
+    walk(t, (k, v) => {
+      if (!v || typeof v !== 'object') return;
+      if (k === 'transcriptSegmentRenderer') out.push({ s: (+v.startMs || 0) / 1000, e: (+v.endMs || 0) / 1000, t: text(v.snippet) });
+      else if (k === 'transcriptSegmentViewModel') out.push({ s: (+(v.startOffsetMs ?? v.startMs) || 0) / 1000, e: (+(v.endOffsetMs ?? v.endMs) || 0) / 1000, t: text(v.simpleText || v.snippet) });
+    });
+    return out.filter(x => x.t).sort((a, b) => a.s - b.s);
+  }
+
+  return { transcript, addToPlaylist, videoText, channelDesc, related, playlistItems, myPlaylists, removeFromPlaylist, subsPage, search, shortsSequence, removeFromWatchLater, watchLater, videoOwner, fetchSubscriptions, fetchMeta, resolveId, channelSubInfo, setSubscribed, setNotification, channelTab, parseTab, recommended, channelPopular, subsFeed, comments, commentsMore, watchHistory, parseDay };
 })();
