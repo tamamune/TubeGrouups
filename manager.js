@@ -1555,7 +1555,7 @@ const TGManager = (() => {
     }
     const chList = [...chRows.values()].map(({ name, c, keys }) => `<div class="cm-row px-chrow"><span>${esc(name)}<em class="px-em">${[c.s > 0 ? `冒頭 ${c.s}秒` : '', c.e > 0 ? `最後 ${c.e}秒` : '', c.mid ? 'サムネ：途中の画面' : ''].filter(Boolean).join('・')}</em></span>
       <button class="icon" data-act="chset-del" data-keys="${esc(keys.join('\n'))}" title="この設定を消す">✕</button></div>`).join('');
-    const px = { seek: true, seekSec: 10, mini: true, brk: 60, bed: true, autoJa: true, adFast: true, saver: false, exact: true, tags: true, nth: true, echo: true, ...(xr.px || {}) };
+    const px = { seek: true, seekSec: 10, mini: true, brk: 60, bed: true, autoJa: true, adFast: true, saver: false, exact: true, tags: true, nth: true, echo: true, hoverSound: true, hoverFast: true, shortsTime: true, ...(xr.px || {}) };
     const rates = xr.folderRates || {}, slp = { on: true, from: '23:00', to: '07:00', ...(xr.sleepWin || {}) };
     const pxRow = (label, key, opts) => `<div class="cm-row"><span>${label}</span><div class="cm-seg">${opts.map(([v, t]) =>
       `<button data-act="pxset" data-k="${key}" data-v="${v}" class="${String(px[key]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div></div>`;
@@ -1596,6 +1596,11 @@ const TGManager = (() => {
       ${pxRow('休憩', 'brk', [[0, 'オフ'], [30, '30分'], [60, '60分'], [90, '90分'], [120, '120分']])}
       ${pxRow('就寝時間', 'bed', [['true', 'オン'], ['false', 'オフ']])}
       <div class="cm-row"><span>就寝時間の範囲<em class="px-em">視聴パターンの就寝時間と共通</em></span><span class="px-time"><input type="time" data-slp="from" value="${esc(slp.from)}">〜<input type="time" data-slp="to" value="${esc(slp.to)}"></span></div>
+      <div class="bk-h cm-h">🖱 サムネに乗せたときのプレビュー・ショート</div>
+      <p class="bk-note">ホームや検索でサムネにマウスを乗せたときのプレビューを、音声あり・2倍速にします（クリック前に中身を確かめられます）。ショートを見ているときは、横の空いた場所に再生時間と今日の視聴時間を出します。</p>
+      ${pxRow('プレビューの音声', 'hoverSound', [['true', 'あり'], ['false', 'なし']])}
+      ${pxRow('プレビューの速さ', 'hoverFast', [['true', '2倍速'], ['false', 'ふつう']])}
+      ${pxRow('ショートの時間表示', 'shortsTime', [['true', '表示'], ['false', '非表示']])}
       <div class="bk-h cm-h">📢 広告・通信量</div>
       <p class="bk-note">広告が流れたら16倍速・ミュートにして一瞬で終わらせ、スキップできるときは自動で押します。省データモードは画質を最低（144p）にして映像を隠し、音声中心で見ます（⚡ ボタンからも切り替え可）。</p>
       ${pxRow('広告の早送り', 'adFast', [['true', 'オン'], ['false', 'オフ']])}
@@ -1674,7 +1679,7 @@ const TGManager = (() => {
     if (st.pop?.kind !== 'settings') return;
     const p = q('.pop');
     p.querySelector('.acc')?.addEventListener('toggle', e => { st.accOpen = e.target.open; });
-    p.querySelector('.drv-auto')?.addEventListener('change', e => drive('setOpt', { patch: { auto: e.target.checked } }));
+    p.querySelector('.drv-auto')?.addEventListener('change', e => drive('setOpt', { patch: { auto: e.target.checked, autoUserOff: !e.target.checked } }));
     const opt = (cls, key) => p.querySelector(cls)?.addEventListener('change', e => drive('setOpt', { patch: { [key]: e.target.checked } }));
     opt('.drv-meta', 'includeMeta');
     opt('.drv-hist', 'incHistory');

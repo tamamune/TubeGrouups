@@ -654,36 +654,153 @@ const TGFeed = (() => {
     await Promise.all(jobs);
   }
   // ---------- ブックマーク（再生中に B キーで保存した時間） ----------
-  async function paintBm(S) {
+  async function bmMove(ids, to) {
+    if (!ids.length) return;
+    let fid = to === '__def' ? '' : to;
+    if (to === '__new') { fid = await bmNewFolder(); if (fid == null) return; }
     const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
+    const set = new Set(ids), now = Date.now();
+    bookmarks.forEach(b => { if (set.has(b.id)) { b.f = fid || ''; b.fAt = now; } });
+    await chrome.storage.local.set({ bookmarks });
+    TG.log('ブックマーク', `${ids.length} 件を移動`);
+    bmSel.clear();
+    paintBm(lastS);
+  }
+  async function bmNewFolder() {
+    const name = (prompt('新しいフォルダの名前', '') || '').trim();
+    if (!name) return null;
+    const { bmFolders = [] } = await chrome.storage.local.get('bmFolders');
+    const f = { id: 'bf' + Date.now().toString(36), name: name.slice(0, 40), order: bmFolders.length, at: Date.now() };
+    bmFolders.push(f);
+    await chrome.storage.local.set({ bmFolders });
+    return f.id;
+  }
+  function bmToggle(id, on) { if (on) bmSel.add(id); else bmSel.delete(id); }
+  function bmPaintSel(g) {
+    g.querySelectorAll('.tg-bmrow').forEach(r => { const on = bmSel.has(r.dataset.bmid); r.classList.toggle('sel', on); const c = r.querySelector('.tg-bmck input'); if (c) c.checked = on; });
+    const bar = g.querySelector('.tg-bmselbar');
+    if (bar) { bar.hidden = !bmSel.size; bar.querySelector('b').textContent = `${bmSel.size} 件を選択中`; }
+  }
+  function bindBm(g) {
+    const ids = () => [...bmSel];
+    g.querySelector('.tg-bmhead')?.addEventListener('click', async e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      e.preventDefault(); e.stopPropagation();
+      if (b.dataset.bmf != null) { bmCur = b.dataset.bmf; bmSel.clear(); return paintBm(lastS); }
+      if (b.dataset.bmfnew) { const id = await bmNewFolder(); if (id) { if (bmSel.size) return bmMove(ids(), id); bmCur = id; paintBm(lastS); } return; }
+      if (b.dataset.bmfren) {
+        const { bmFolders = [] } = await chrome.storage.local.get('bmFolders');
+        const f = bmFolders.find(x => x.id === bmCur); if (!f) return;
+        const name = (prompt('フォルダの名前', f.name) || '').trim(); if (!name) return;
+        f.name = name.slice(0, 40); f.at = Date.now();
+        await chrome.storage.local.set({ bmFolders }); return paintBm(lastS);
+      }
+      if (b.dataset.bmfdel) {
+        const { bmFolders = [], bookmarks = [] } = await chrome.storage.local.get(['bmFolders', 'bookmarks']);
+        const f = bmFolders.find(x => x.id === bmCur); if (!f) return;
+        if (!confirm(`フォルダ「${f.name}」を消しますか？\n中のブックマークは「ブックマーク」に戻ります（消えません）。`)) return;
+        f.del = true; f.at = Date.now();
+        const now = Date.now();
+        bookmarks.forEach(x => { if (x.f === f.id) { x.f = ''; x.fAt = now; } });
+        await chrome.storage.local.set({ bmFolders, bookmarks });
+        bmCur = 'all'; return paintBm(lastS);
+      }
+      if (b.dataset.bmselall) { bmList.forEach(x => bmSel.add(x.bm)); return bmPaintSel(g); }
+      if (b.dataset.bmselclear) { bmSel.clear(); return bmPaintSel(g); }
+      if (b.dataset.bmseldel) {
+        if (!confirm(`選んだ ${bmSel.size} 件のブックマークを消しますか？`)) return;
+        const { bookmarks = [], bmRemoved = {} } = await chrome.storage.local.get(['bookmarks', 'bmRemoved']);
+        const set = new Set(ids()), now = Date.now();
+        set.forEach(id => { bmRemoved[id] = now; });
+        await chrome.storage.local.set({ bookmarks: bookmarks.filter(x => !set.has(x.id)), bmRemoved });
+        chrome.storage.local.remove([...set].map(id => 'bmt:' + id));
+        bmSel.clear(); return paintBm(lastS);
+      }
+    });
+    g.querySelector('.tg-bmto')?.addEventListener('change', e => { const v = e.target.value; e.target.value = ''; if (v) bmMove(ids(), v); });
+    // チェック・Shift＋クリックで範囲選択
+    g.querySelectorAll('.tg-bmrow').forEach(row => {
+      row.addEventListener('click', e => {
+        const ck = e.target.closest('.tg-bmck');
+        const idx = +row.dataset.idx, id = row.dataset.bmid;
+        if (e.shiftKey && !e.target.closest('button, input[type=text]')) {
+          e.preventDefault(); e.stopPropagation();
+          const from = bmLast >= 0 ? Math.min(bmLast, idx) : idx, to = bmLast >= 0 ? Math.max(bmLast, idx) : idx;
+          for (let i = from; i <= to; i++) if (bmList[i]) bmSel.add(bmList[i].bm);
+          bmLast = idx; return bmPaintSel(g);
+        }
+        if (ck) { e.stopPropagation(); if (e.target.tagName !== 'INPUT') e.preventDefault(); bmToggle(id, !bmSel.has(id)); bmLast = idx; return bmPaintSel(g); }
+        if ((e.ctrlKey || e.metaKey) && !e.target.closest('a, button')) { bmToggle(id, !bmSel.has(id)); bmLast = idx; bmPaintSel(g); }
+      }, true);
+      row.addEventListener('dragstart', e => {
+        if (!bmSel.has(row.dataset.bmid)) { bmSel.clear(); bmSel.add(row.dataset.bmid); bmPaintSel(g); }
+        e.dataTransfer.setData('text/plain', 'tg-bm');
+        e.dataTransfer.effectAllowed = 'move';
+        g.classList.add('tg-bmdragging');
+      });
+      row.addEventListener('dragend', () => g.classList.remove('tg-bmdragging'));
+    });
+    g.querySelectorAll('[data-bmdrop]').forEach(chip => {
+      chip.addEventListener('dragover', e => { e.preventDefault(); chip.classList.add('tg-bmover'); });
+      chip.addEventListener('dragleave', () => chip.classList.remove('tg-bmover'));
+      chip.addEventListener('drop', e => { e.preventDefault(); chip.classList.remove('tg-bmover'); bmMove(ids(), chip.dataset.bmf === '' ? '__def' : chip.dataset.bmf); });
+    });
+  }
+  // ブックマークのフォルダ：bmFolders [{ id, name, order, at, del }]、各ブックマークの f（無し＝「ブックマーク」）
+  let bmCur = 'all', bmSel = new Set(), bmLast = -1, bmList = [], lastS = null;
+  async function paintBm(S) {
+    lastS = S;
+    const { bookmarks = [], bmFolders = [] } = await chrome.storage.local.get(['bookmarks', 'bmFolders']);
     const fav = favSetOf(S);
-    const list = bookmarks.map(b => ({ v: b.v, t: b.t, p: 0, d: b.d || 0, sec: b.sec, bm: b.id, note: b.note || '', desc: b.desc || '', savedAt: b.at, ch: { key: b.k || b.ch?.key || '', name: (typeof b.ch === 'object' ? b.ch?.name : b.ch) || '', unsub: !((b.k || b.ch?.key) && fav.has(b.k || b.ch?.key)) } }));
+    const folders = bmFolders.filter(f => !f.del);
+    const fIds = new Set(folders.map(f => f.id));
+    const fOf = b => (b.f && fIds.has(b.f) ? b.f : '');
+    if (bmCur !== 'all' && bmCur !== '' && !fIds.has(bmCur)) bmCur = 'all';
+    const cnt = id => bookmarks.filter(b => fOf(b) === id).length;
+    const all = bookmarks.map(b => ({ v: b.v, t: b.t, p: 0, d: b.d || 0, sec: b.sec, bm: b.id, f: fOf(b), note: b.note || '', desc: b.desc || '', savedAt: b.at, ch: { key: b.k || b.ch?.key || '', name: (typeof b.ch === 'object' ? b.ch?.name : b.ch) || '', unsub: !((b.k || b.ch?.key) && fav.has(b.k || b.ch?.key)) } }));
+    const list = bmCur === 'all' ? all : all.filter(x => x.f === bmCur);
+    bmList = list;
+    bmSel = new Set([...bmSel].filter(id => list.some(x => x.bm === id)));
     items = list; shown = list.length;
     el.classList.remove('tg-loading');
     const g = el.querySelector('.tg-grid');
     g.classList.remove('tg-split');
-    status(list.length ? `ブックマーク ${list.length} 件（新しい順）・サムネか時間を押すと、その時間から再生` : '');
-    if (!list.length) { g.innerHTML = '<div class="tg-empty">ブックマークはまだありません。<br>動画を再生中に <b>B</b> キーを押すと、その時間を保存できます。</div>'; return; }
+    status(all.length ? `ブックマーク ${list.length} 件（新しい順）・チェックか Shift＋クリックで選んで、フォルダへドラッグ` : '');
+    const chip = (id, label, n, extra = '') => `<button class="tg-chip tg-bmf ${bmCur === id ? 'tg-active' : ''}" data-bmf="${esc(id)}" ${id !== 'all' ? 'data-bmdrop="1"' : ''}>${label}<small>${n}</small></button>${extra}`;
+    const cur = folders.find(f => f.id === bmCur);
+    const head = `<div class="tg-bmhead">
+      <div class="tg-bmfolders">${chip('all', 'すべて', all.length)}${chip('', '🔖 ブックマーク', cnt(''))}${folders.map(f => chip(f.id, '📁 ' + esc(f.name), cnt(f.id))).join('')}
+        <button class="tg-chip tg-ghost" data-bmfnew="1" title="新しいフォルダを作る">＋ フォルダ</button>
+        ${cur ? `<button class="tg-chip tg-ghost" data-bmfren="1" title="このフォルダの名前を変える">✎ 名前</button><button class="tg-chip tg-ghost" data-bmfdel="1" title="このフォルダを消す（中のブックマークは「ブックマーク」に戻る）">🗑 フォルダを消す</button>` : ''}</div>
+      <div class="tg-bmselbar" ${bmSel.size ? '' : 'hidden'}><b>${bmSel.size} 件を選択中</b>
+        <select class="tg-bmto"><option value="">移動先を選ぶ…</option><option value="__def">🔖 ブックマーク</option>${folders.map(f => `<option value="${esc(f.id)}">📁 ${esc(f.name)}</option>`).join('')}<option value="__new">＋ 新しいフォルダ…</option></select>
+        <button class="tg-chip" data-bmselall="1">すべて選ぶ</button><button class="tg-chip tg-ghost" data-bmselclear="1">選択を外す</button><button class="tg-chip tg-ghost" data-bmseldel="1">🗑 選んだものを消す</button>
+        <span class="tg-bmhint">選んだものはフォルダのボタンへドラッグしても移動できます</span></div></div>`;
+    if (!list.length) { g.innerHTML = head + `<div class="tg-empty">${all.length ? 'このフォルダは空です。ほかのフォルダからドラッグして入れられます。' : 'ブックマークはまだありません。<br>動画を再生中に <b>B</b> キーを押すと、その時間を保存できます。'}</div>`; bindBm(g); return; }
     const shots = await chrome.storage.local.get(list.map(x => 'bmt:' + x.bm));
     const when = t => { const d = new Date(t); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
-    g.innerHTML = `<div class="tg-bml">${list.map(it => {
+    g.innerHTML = head + `<div class="tg-bml">${list.map((it, idx) => {
       const url = `/watch?v=${esc(it.v)}&t=${Math.floor(it.sec)}s`;
       const shot = shots['bmt:' + it.bm];
       const pct = it.d ? Math.min(100, Math.round((it.sec / it.d) * 100)) : 0;
       const tags = (folderMap.get(it.ch.key) || []).map(f => `<span class="tg-ftag" style="--c:${esc(f.color)}">${esc(f.name)}</span>`).join('');
-      return `<div class="tg-bmrow" data-v="${esc(it.v)}">
+      const fName = it.f ? folders.find(f => f.id === it.f)?.name : '';
+      return `<div class="tg-bmrow ${bmSel.has(it.bm) ? 'sel' : ''}" data-v="${esc(it.v)}" data-bmid="${esc(it.bm)}" data-idx="${idx}" draggable="true">
+        <label class="tg-bmck" title="選ぶ（Shift＋クリックで範囲）"><input type="checkbox" ${bmSel.has(it.bm) ? 'checked' : ''}></label>
         <a class="tg-bmth" href="${url}" title="${fmtDur(it.sec)} から再生"><img src="${shot ? shot : `https://i.ytimg.com/vi/${esc(it.v)}/mqdefault.jpg`}" alt="" loading="lazy">
           <span class="tg-bmtime">🔖 ${fmtDur(it.sec)}</span>${it.d ? `<span class="tg-dur">${fmtDur(it.d)}</span>` : ''}
           ${it.d ? `<span class="tg-bmbar"><i style="width:${pct}%"></i></span>` : ''}</a>
         <div class="tg-bminfo">
           <div class="tg-bmt"><a href="${url}">${esc(it.t)}</a><button class="tg-bmx" data-bmrm="${esc(it.bm)}" title="ブックマークを消す">✕</button></div>
           <div class="tg-bmnote" data-bmnote="${esc(it.bm)}">${it.note ? `<span>📝 ${esc(it.note)}</span><button class="tg-bmedit" title="メモを直す">✎</button>` : '<button class="tg-bmedit tg-bmadd">＋ メモを追加</button>'}</div>
-          <div class="tg-bmch">${esc(it.ch.name)}${tags}</div>
+          <div class="tg-bmch">${esc(it.ch.name)}${tags}${bmCur === 'all' && fName ? `<span class="tg-bmfl">📁 ${esc(fName)}</span>` : ''}</div>
           <div class="tg-bmstop"><a class="tg-bmgo" href="${url}">▶ ${fmtDur(it.sec)} から再生</a><span>止めた位置 ${fmtDur(it.sec)}${it.d ? ` / ${fmtDur(it.d)}（${pct}%）` : ''}</span><span>・${when(it.savedAt)} に保存</span></div>
           <div class="tg-bmdesc" data-bmdesc="${esc(it.bm)}">${it.desc ? (it.desc.trim() ? esc(it.desc) : '（概要欄はありません）') : '<span class="tg-bmload">概要欄を読み込み中…</span>'}</div>
           ${it.desc && it.desc.length > 160 ? '<button class="tg-bmmore">もっと見る</button>' : ''}
         </div></div>`;
     }).join('')}</div>`;
+    bindBm(g);
     // 概要欄が無いもの（古いブックマーク）は取得して保存
     const need = [...new Set(list.filter(x => !x.desc).map(x => x.v))].slice(0, 20);
     for (const v of need) {

@@ -247,7 +247,9 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         // 次から裏で取り直すときに使うアカウント（Driveの情報から）
         let email = '';
         try { email = (await (await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + t } })).json())?.user?.emailAddress || ''; } catch { /* 取れなくても続ける */ }
-        await setSync({ connected: true, lastError: '', needReauth: false, ...(email ? { email } : {}) });
+        // TubeFolio のデータは基本 Drive に保存して他の端末と共有（自分で自動同期を切った場合はそのまま）
+        const cur = await getSync();
+        await setSync({ connected: true, lastError: '', needReauth: false, ...(email ? { email } : {}), ...(cur.autoUserOff ? {} : { auto: true }) });
         TG.log('同期', 'Google Drive に接続しました' + (email ? `（${email.replace(/(.{2}).*(@.*)/, '$1…$2')}）` : ''));
         const remote = await findFile(false);
         return { connected: true, hasRemote: !!remote };

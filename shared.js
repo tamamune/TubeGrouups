@@ -252,8 +252,8 @@ const TG = {
   // 保存の種類（Drive・ファイル共通）
   AUX: {
     history: ['history', 'daily', 'watched', 'ytHistSeen', 'dayCh', 'dayHr', 'dayYt'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
-    later: ['later', 'laterRemoved', 'bookmarks', 'bmRemoved'],                      // 後で見る（外した記録も）
-    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'cmOpen', 'pickMode', 'notifyRules', 'focus', 'folderGoals', 'sleepWin', 'cchap', 'px', 'folderRates', 'chSet', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
+    later: ['later', 'laterRemoved', 'bookmarks', 'bmRemoved', 'bmFolders'],                      // 後で見る（外した記録も）
+    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'cmOpen', 'pickMode', 'notifyRules', 'focus', 'folderGoals', 'sleepWin', 'cchap', 'px', 'folderRates', 'chSet', 'freeMin', 'viewCap', 'statsPat', 'laterOpen', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
   },
 
   // opts: { meta, history, later, prefs }（省略時はすべて含める）
@@ -341,10 +341,17 @@ const TG = {
           const m = { ...cur, ...x };
           // メモは新しく書いたほうを残す
           if ((cur.noteAt || 0) > (x.noteAt || 0)) { m.note = cur.note; m.noteAt = cur.noteAt; }
+          if ((cur.fAt || 0) > (x.fAt || 0)) { m.f = cur.f; m.fAt = cur.fAt; } // フォルダの移動も新しいほう
           bm.set(x.id, m);
         }
         set.bookmarks = [...bm.values()].sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 3000);
         set.bmRemoved = Object.fromEntries(Object.entries(rm).filter(([, at]) => at > cut));
+      }
+      // ブックマークのフォルダ：IDごとに新しく変えたほう（名前の変更・削除の印 del も）
+      if (lt.bmFolders || L.bmFolders) {
+        const m = new Map();
+        for (const f of [...(L.bmFolders || []), ...(lt.bmFolders || [])]) { const c = m.get(f.id); if (!c || (f.at || 0) > (c.at || 0)) m.set(f.id, f); }
+        set.bmFolders = [...m.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       }
     }
     // 設定は、Drive側の方が新しく変更されているときだけ反映（このPCで変えたばかりの設定を古い値で戻さない）

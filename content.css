@@ -727,3 +727,28 @@ html[dark] .tg-nth-it .tx em.op { color: #ff8a80; }
 html[dark] .tg-nth-it .tx em.far { color: #ce93d8; }
 .tg-free-min::-webkit-calendar-picker-indicator { opacity: .7; cursor: pointer; }
 html[dark] .tg-free-min::-webkit-calendar-picker-indicator { filter: invert(1); }
+/* ブックマークのフォルダ・選択 */
+.tg-bmhead { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+.tg-bmfolders { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tg-bmf small { margin-left: 6px; opacity: .6; font-size: 11px; }
+.tg-bmf.tg-bmover { outline: 2px dashed #3ea6ff; outline-offset: 2px; background: rgba(62,166,255,.25) !important; }
+.tg-bmdragging .tg-bmf[data-bmdrop] { outline: 1px dashed var(--tg-sub); outline-offset: 1px; }
+.tg-bmselbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px; border-radius: 10px; background: rgba(62,166,255,.14); color: var(--tg-fg); font: 13px Roboto, Arial, "Noto Sans JP", sans-serif; }
+.tg-bmselbar[hidden] { display: none; }
+.tg-bmto { height: 30px; border-radius: 15px; border: 1px solid var(--tg-chip-h); background: var(--tg-chip); color: var(--tg-fg); padding: 0 10px; font: inherit; }
+.tg-bmto option { background: #fff; color: #0f0f0f; }
+html[dark] .tg-bmto option { background: #282828; color: #f1f1f1; }
+.tg-bmhint { color: var(--tg-sub); font-size: 12px; }
+.tg-bmrow { position: relative; }
+.tg-bmrow.sel { outline: 2px solid #3ea6ff; background: rgba(62,166,255,.10); }
+.tg-bmck { position: absolute; left: 4px; top: 4px; z-index: 6; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; background: rgba(0,0,0,.55); cursor: pointer; }
+.tg-bmck input { width: 16px; height: 16px; margin: 0; cursor: pointer; accent-color: #3ea6ff; }
+.tg-bmth .tg-bmtime { left: 34px !important; }
+.tg-bmfl { margin-left: 6px; padding: 1px 8px; border-radius: 10px; background: var(--tg-chip-h); font-size: 11px; }
+/* ショートの再生時間・今日の視聴時間 */
+#tg-stime { position: fixed; z-index: 2000; min-width: 160px; padding: 10px 14px; border-radius: 14px; background: rgba(20,20,20,.82); color: #fff; font: 13px/1.6 Roboto, Arial, "Noto Sans JP", sans-serif; box-shadow: 0 4px 16px rgba(0,0,0,.35); pointer-events: none; }
+#tg-stime .t { font: 700 22px/1.2 Roboto, Arial, sans-serif; font-variant-numeric: tabular-nums; }
+#tg-stime .t small { font-size: 14px; opacity: .7; }
+#tg-stime .bar { height: 4px; margin: 6px 0 8px; border-radius: 2px; background: rgba(255,255,255,.25); overflow: hidden; }
+#tg-stime .bar i { display: block; height: 100%; background: #ff0033; }
+#tg-stime .d b { font-variant-numeric: tabular-nums; }

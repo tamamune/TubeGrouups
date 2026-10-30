@@ -1952,6 +1952,53 @@
     TGX.check({ force: !!m.force }).then(r => reply({ ok: true, ...r }), e => reply({ ok: false, error: e.message }));
     return true;
   });
+  // ---------- ホバー再生（サムネに乗せたときのプレビュー）を 音声あり・2倍速 に ----------
+  //   YouTube のプレビュー用プレイヤーをそのまま使い、ミュート解除・速度だけ変える（px.hoverSound / px.hoverFast）
+  let PXH = { hoverSound: true, hoverFast: true };
+  chrome.storage.local.get('px').then(r => { PXH = { hoverSound: true, hoverFast: true, ...(r.px || {}) }; });
+  chrome.storage.onChanged.addListener(ch => { if (ch.px) PXH = { hoverSound: true, hoverFast: true, ...(ch.px.newValue || {}) }; });
+  const isPreview = v => v.tagName === 'VIDEO' && !v.closest('ytd-shorts, ytd-reel-video-renderer, #shorts-player, #tg-mini, ytd-watch-flexy #player-container, ytd-miniplayer')
+    && (!!v.closest('#inline-preview-player, ytd-video-preview, #video-preview, ytd-moving-thumbnail-renderer, [id*="preview" i]') || !v.closest('#movie_player'));
+  const hovStart = new WeakMap();
+  function tuneHover(v) {
+    if (!hovStart.has(v)) hovStart.set(v, Date.now());
+    if (Date.now() - hovStart.get(v) > 1500) return; // 始まってすぐだけ合わせる（そのあと自分で変えたものは尊重）
+    if (PXH.hoverFast && v.playbackRate !== 2) try { v.playbackRate = 2; } catch { /* なし */ }
+    if (PXH.hoverSound && v.muted) { v.muted = false; if (!v.volume) v.volume = 0.5; }
+  }
+  ['playing', 'loadeddata', 'ratechange', 'volumechange'].forEach(t => document.addEventListener(t, e => {
+    const v = e.target;
+    if (!isPreview(v)) return;
+    if (t === 'loadeddata') hovStart.delete(v);
+    tuneHover(v);
+  }, true));
+
+  // ---------- ショート：空いている場所に再生時間と今日の視聴時間 ----------
+  let stBox = null, stToday = { at: 0, all: 0, short: 0 };
+  const mmss = s => { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+  const hm2 = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}時間${m}分` : `${m}分`; };
+  async function shortsTime() {
+    if (!isShortsPage() || PXH.shortsTime === false) { stBox?.remove(); stBox = null; return; }
+    const v = document.querySelector('ytd-reel-video-renderer[is-active] video, ytd-shorts #shorts-player video, #shorts-player video');
+    const pl = v?.closest('#shorts-player, ytd-reel-video-renderer') || v;
+    if (!v || !pl) return;
+    if (Date.now() - stToday.at > 10000) {
+      const day = TG.dayKey();
+      const { daily = {}, dayHr = {} } = await chrome.storage.local.get(['daily', 'dayHr']);
+      stToday = { at: Date.now(), all: daily[day] || 0, short: dayHr[day]?.s || 0 };
+    }
+    const day = TG.dayKey();
+    const all = stToday.all + (hDaily[day] || 0), sh = stToday.short + (hSlot[day]?.h?.s || 0);
+    if (!stBox) { stBox = document.createElement('div'); stBox.id = 'tg-stime'; document.body.appendChild(stBox); }
+    stBox.innerHTML = `<div class="t">⏱ ${mmss(v.currentTime)} <small>/ ${mmss(v.duration)}</small></div><div class="bar"><i style="width:${v.duration ? (v.currentTime / v.duration) * 100 : 0}%"></i></div>
+      <div class="d">今日の視聴 <b>${hm2(all)}</b></div><div class="d">うちショート <b>${hm2(sh)}</b></div>`;
+    const r = pl.getBoundingClientRect(), w = stBox.offsetWidth || 170;
+    const left = r.left - w - 24;
+    stBox.style.left = Math.max(8, left > 8 ? left : r.right + 90) + 'px';
+    stBox.style.top = Math.max(70, r.top + 16) + 'px';
+  }
+  setInterval(() => shortsTime().catch(() => {}), 500);
+
   // 再生画面の追加機能（playerx.js）から使う
   globalThis.TGPage = {
     currentChannel: () => (isWatchPage() ? currentChannel() : null), state: () => S,

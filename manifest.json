@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TubeFolio",
-  "version": "4.34.2",
+  "version": "4.35.0",
   "description": "YouTubeの登録チャンネルをフォルダで整理。フォルダ別の新着・動画・ライブ・ショート一覧、通知、集中モード、視聴記録。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArZ9eZ9HEFkTJX1DwJ9zyfyjRsUM0B6ae/Ptg+Pcr10wUvyMPfy6CsRxWTPUViflqOAT8HxRoRwFomBZPpOiNYDG2pJgML71sEVr9wcHXcHzi42MBenNf4+41f3MqsCd6DOg0rjUYR7qqNEhzxTnOtTRZpZaAt1VRboHtKFKnwtCuN8vhWmqrRdX0+wA08IqQW9iPA+2HdFrnEsQEqy5z4s0aU24mdFXNTtFJoY3JKc1G7tDtOOmqdLmWWwif2EzIKLZVLewY4gdEaOKbhNGDwFxuMMei4RUiJasmvvSTnyYRGZ6DIvqAA1/NwkVI4phQMn8/3caNTMQd2lbLAasC3wIDAQAB",
   "permissions": [
