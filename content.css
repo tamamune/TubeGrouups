@@ -621,10 +621,7 @@ html[dark] .tg-bmgo { background: #3ea6ff; color: #0f0f0f !important; }
 .tg-px-chpop label.ck small { width: 100%; opacity: .6; font-size: 11px; padding-left: 22px; }
 .tg-px-chpop p { margin: 8px 0 0; opacity: .6; font-size: 11px; }
 .tg-free { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0 0 26px; padding: 0; background: none; color: var(--tg-fg); font: 400 12px Roboto, Arial, "Noto Sans JP", sans-serif; cursor: default; }
-.tg-free-min { width: 56px; height: 26px; border-radius: 6px; border: 1px solid var(--tg-chip-h); background: transparent; color: var(--tg-fg); padding: 0 6px; font: inherit; }
-.tg-free-pre { height: 26px; border-radius: 6px; border: 1px solid var(--tg-chip-h); background: transparent; color: var(--tg-fg); font: inherit; }
-.tg-free-pre option { background: #fff; color: #0f0f0f; }
-html[dark] .tg-free-pre option { background: #282828; color: #f1f1f1; }
+.tg-free-min { width: 72px; height: 26px; border-radius: 6px; border: 1px solid var(--tg-chip-h); background: transparent; color: var(--tg-fg); padding: 0 6px; font: inherit; }
 .tg-free-go, .tg-free-bed { height: 26px; padding: 0 10px; border: none; border-radius: 13px; background: #065fd4; color: #fff; font-weight: 700; cursor: pointer; font-size: 12px; }
 .tg-free-bed { background: #3949ab; }
 html[dark] .tg-free-go { background: #3ea6ff; color: #0f0f0f; }
@@ -728,3 +725,5 @@ html[dark] .tg-vcap select option { background: #282828; color: #f1f1f1; }
 .tg-nth-it .tx em.far { color: #8e24aa; }
 html[dark] .tg-nth-it .tx em.op { color: #ff8a80; }
 html[dark] .tg-nth-it .tx em.far { color: #ce93d8; }
+.tg-free-min::-webkit-calendar-picker-indicator { opacity: .7; cursor: pointer; }
+html[dark] .tg-free-min::-webkit-calendar-picker-indicator { filter: invert(1); }

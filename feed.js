@@ -736,8 +736,7 @@ const TGFeed = (() => {
   chrome.storage.local.get('freeMin').then(r => { if (r.freeMin) freeMin = r.freeMin; });
   function freeTool(id) {
     return `<span class="tg-free" data-free="${esc(id)}"><span>⏱ 空き時間</span>
-      <select class="tg-free-pre" title="時間を選ぶ">${[20, 40, 60, 90, 120].map(m => `<option value="${m}" ${m === freeMin ? 'selected' : ''}>${m}分</option>`).join('')}${[20, 40, 60, 90, 120].includes(freeMin) ? '' : `<option value="${freeMin}" selected>${freeMin}分</option>`}</select>
-      <input type="number" class="tg-free-min" min="5" max="600" step="5" value="${freeMin}" title="分を入力">分
+      <input type="text" inputmode="numeric" list="tg-free-list" class="tg-free-min" value="${freeMin}分" title="分を入力するか、▼ から選ぶ（20・40・60・90・120分）">
       <button class="tg-free-go" title="この時間にぴったり収まる組み合わせを選んで連続再生">▶ ぴったり再生</button>
       <button class="tg-free-bed" title="就寝時間（⚙ → 再生画面 → リマインダー）までに収まる組み合わせを連続再生">🌙 就寝時間まで</button>
       <span class="tg-free-msg"></span></span>`;
@@ -780,12 +779,21 @@ const TGFeed = (() => {
   }
   function bindFree(g) {
     g.querySelectorAll('.tg-free').forEach(box => {
-      const inp = box.querySelector('.tg-free-min'), pre = box.querySelector('.tg-free-pre');
+      const inp = box.querySelector('.tg-free-min');
       ['click', 'mousedown'].forEach(t => box.addEventListener(t, e => e.stopPropagation())); // 見出しの開閉にしない
       ['keydown', 'keyup', 'keypress'].forEach(t => inp.addEventListener(t, e => { e.stopPropagation(); if (t === 'keydown' && e.key === 'Enter') box.querySelector('.tg-free-go').click(); }));
-      pre.addEventListener('change', () => { inp.value = pre.value; });
+      // 20〜120分の候補（入力欄の ▼ から選べる）。ページに1つだけ置く
+      if (!document.getElementById('tg-free-list')) {
+        const dl = document.createElement('datalist');
+        dl.id = 'tg-free-list';
+        dl.innerHTML = [20, 40, 60, 90, 120].map(m => `<option value="${m}分"></option>`).join(''); // 「20分」だけを1行で出す（数字は使うときに取り出す）
+        document.body.appendChild(dl);
+      }
+      // 押したときは候補が全部見えるよう空にして、今の値は薄く表示。何も選ばなければ元に戻す
+      inp.addEventListener('focus', () => { inp.placeholder = inp.value || String(freeMin); inp.value = ''; });
+      inp.addEventListener('blur', () => { const n = parseInt(inp.value.replace(/[^\d]/g, ''), 10); inp.value = n ? n + '分' : inp.placeholder; });
       box.querySelector('.tg-free-go').addEventListener('click', () => {
-        freeMin = Math.max(5, Math.min(600, +inp.value || 45));
+        freeMin = Math.max(5, Math.min(600, parseInt(String(inp.value || inp.placeholder).replace(/[^\d]/g, ''), 10) || 45));
         chrome.storage.local.set({ freeMin });
         playFit(box, freeMin, `空き時間 ${freeMin}分`);
       });
