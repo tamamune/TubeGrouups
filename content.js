@@ -559,7 +559,7 @@
     const fName = S.activeGroup === '__unsorted' ? '未分類' : S.folders.find(f => f.id === S.activeGroup)?.name;
     const ph = S.feedType === 'new' ? '新着から検索' : S.feedType === 'later' ? '後で見るから検索' : S.feedType === 'rec' ? 'おすすめから検索' : fName ? `「${fName}」内を検索` : '一覧から検索';
     const qbox = `<label class="tg-qbox ${qText ? 'tg-has' : ''}" title="表示中の一覧をタイトル・チャンネル名で絞り込み（スペースで区切ると全部を含むもの）"><span>🔍</span><input class="tg-q" type="search" placeholder="${esc(ph)}" value="${esc(qText)}"></label>`;
-    const tools = `<div class="tg-seg">${types}</div><div class="tg-seg" title="列の数"><span class="tg-seg-lb">列</span>${cols}</div>${qbox}`;
+    const tools = `<div class="tg-seg">${types}</div>${S.feedType === 'bm' ? '' : `<div class="tg-seg" title="列の数"><span class="tg-seg-lb">列</span>${cols}</div>`}${qbox}`; // ブックマークは列の数を使わない
 
     // 2段目：フォルダ（横幅いっぱいに折り返し）
     let folders = chip('data-g=""', 'すべて', !S.activeGroup, NC.get('__all'));
