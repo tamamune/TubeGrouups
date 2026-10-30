@@ -38,12 +38,12 @@ const TGX = (() => {
   //   ・同じ動画・同じ日は二度数えない（ytHistSeen）
   async function importHistory({ force = false } = {}) {
     const now = Date.now();
-    const st = await chrome.storage.local.get(['history', 'daily', 'ytHistSeen', 'lastHistImport', 'ytHistOn']);
+    const st = await chrome.storage.local.get(['history', 'daily', 'ytHistSeen', 'lastHistImport', 'ytHistOn', 'dayYt']);
     if (st.ytHistOn === false && !force) return { off: true };
     if (!force && now - (st.lastHistImport || 0) < 60 * 60e3) return { skipped: true };
     const first = !st.ytHistSeen;
     const list = await YTAPI.watchHistory({ maxPages: first ? 15 : 4, stopBefore: first ? 0 : now - 10 * 864e5 });
-    const history = st.history || {}, daily = st.daily || {}, seen = st.ytHistSeen || {};
+    const history = st.history || {}, daily = st.daily || {}, seen = st.ytHistSeen || {}, dayYt = st.dayYt || {}; // dayYt … 日・チャンネルごとの秒（~s＝ショート）
     let added = 0, skippedPc = 0;
     for (const x of list) {
       if (x.day == null) continue;
@@ -64,11 +64,16 @@ const TGX = (() => {
         sec: (h?.sec || 0) + sec, src: h && h.src !== 'yt' ? 'mix' : 'yt', ytDay: dk, rate: h?.rate || ''
       };
       daily[dk] = (daily[dk] || 0) + sec;
+      const yd = (dayYt[dk] ||= {}), ck = x.chKey || h?.k || (x.chName ? '#' + x.chName : '');
+      yd[ck] = (yd[ck] || 0) + sec;
+      if (x.short || h?.short) yd['~s'] = (yd['~s'] || 0) + sec;
       added++;
     }
     const keys = Object.keys(seen);
     if (keys.length > 8000) keys.slice(0, keys.length - 8000).forEach(k => delete seen[k]);
-    await chrome.storage.local.set({ history, daily, ytHistSeen: seen, lastHistImport: now });
+    const cutDay = TG.dayKey(now - 400 * 864e5);
+    for (const d of Object.keys(dayYt)) if (d < cutDay) delete dayYt[d];
+    await chrome.storage.local.set({ history, daily, ytHistSeen: seen, lastHistImport: now, dayYt });
     TG.log('履歴', `YouTubeの履歴を取り込み：${list.length}本を確認、${added}本を追加（PCの記録と重複 ${skippedPc}本）${force ? '（手動）' : ''}`);
     return { added, skippedPc, total: list.length };
   }
@@ -291,10 +296,15 @@ const TGX = (() => {
   // ---------- 終わる30秒前に「次に見る動画」4本 ----------
   //   1本目：TubeFolioの連続再生中なら次の動画 ／ YouTubeの再生リストで見ているならリストの次の動画
   //   2本目以降：TubeFolioの「後で見る」からランダム（無ければYouTubeのおすすめ＝関連動画）
-  //   出す場面（pickMode）：'auto'＝連続再生・再生リストのとき（初期） ／ 'always'＝いつも ／ 'off'＝出さない
+  //   出す場面（pickMode）：'auto'＝TubeFolioの後で見る・連続再生／YouTubeの再生リストのときだけ（初期・ほかの動画はふつうに再生）
+  //                         'always'＝いつも ／ 'off'＝出さない
   const PICK_SEC = 30;
   let pickFor = null, pickMode = 'auto';
-  chrome.storage.local.get('pickMode').then(r => { pickMode = r.pickMode || 'auto'; });
+  chrome.storage.local.get(['pickMode', 'pickMig']).then(r => {
+    // v4.27.6 で一時的に「いつも」に切り替えた分を元に戻す
+    if (r.pickMig === 1 && r.pickMode === 'always') { r.pickMode = 'auto'; chrome.storage.local.set({ pickMode: 'auto', pickMig: 2 }); }
+    pickMode = r.pickMode || 'auto';
+  });
   chrome.storage.onChanged?.addListener(ch => { if (ch.pickMode) pickMode = ch.pickMode.newValue || 'auto'; });
   const listParam = () => new URLSearchParams(location.search).get('list');
   document.addEventListener('timeupdate', e => {

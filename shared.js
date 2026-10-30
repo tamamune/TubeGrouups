@@ -5,6 +5,20 @@
 //   meta:     { [key]: { last, interval, count, at } }
 //   activeGroup: null(すべて) / "__unsorted" / フォルダID
 //   feedType: "video" | "live" | "short"     cols: 3 | 4 | 5
+// 拡張を更新・再読み込みすると、開いたままのYouTubeのタブに残った古いスクリプトは chrome.* が使えなくなる
+// （Extension context invalidated）。その後は静かに止まるようにする（タブを再読み込みすると新しい版が動く）
+if (typeof window !== 'undefined' && typeof location !== 'undefined' && location.hostname === 'www.youtube.com') {
+  const alive = () => { try { return !!chrome.runtime?.id; } catch { return false; } };
+  const dead = e => !alive() || /Extension context invalidated/i.test(String(e?.message || e?.reason?.message || e?.reason || e || ''));
+  window.addEventListener('error', e => { if (dead(e.error || e.message)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  window.addEventListener('unhandledrejection', e => { if (dead(e.reason)) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  // タイマー・アニメーションの呼び出しは、止まった後は何もしない
+  for (const name of ['setInterval', 'setTimeout', 'requestAnimationFrame']) {
+    const orig = window[name].bind(window);
+    window[name] = (fn, ...a) => orig(typeof fn === 'function' ? (...x) => { if (alive()) return fn(...x); } : fn, ...a);
+  }
+}
+
 const TG = {
   APP: 'TubeFolio',
   // 名前を変える前に作ったバックアップ・Driveのファイルを読み込むためだけに使う旧名
@@ -145,6 +159,11 @@ const TG = {
   },
   // いま集中モードか。戻り値 { active, until（終わる時刻）, slot, unlocked（一時解除中） }
   focusState(F, t = Date.now()) {
+    // 「このフォルダだけに集中」（視聴パターン画面から・時間を決めて一時的に）
+    if ((F?.tempUntil || 0) > t) {
+      const unlocked = (F.unlockUntil || 0) > t;
+      return { active: !unlocked, unlocked, until: F.tempUntil, temp: true };
+    }
     if (!F?.on) return { active: false };
     const d = new Date(t);
     for (const s of F.slots || []) {
@@ -165,13 +184,19 @@ const TG = {
     return { active: false };
   },
   // フォルダが見えない状態か（トップのフォルダで判定）
+  // 一時集中中は「選んだフォルダだけ見られる」として扱う
+  focusEff(F, t = Date.now()) {
+    return (F?.tempUntil || 0) > t ? { ...F, type: 'allow', allow: F.tempAllow || [] } : F;
+  },
   folderLocked(F, folders, id) {
+    F = TG.focusEff(F);
     const root = TG.rootOf(folders, id)?.id || id;
     if (id === '__unsorted') return F.type === 'allow' && !(F.allow || []).includes('__unsorted');
     return F.type === 'allow' ? !(F.allow || []).includes(root) : (F.lock || []).includes(root);
   },
   // チャンネルが見えない状態か（fs＝そのチャンネルが入っているフォルダ、null＝登録外・不明）
   channelLocked(F, folders, fs) {
+    F = TG.focusEff(F);
     if (F.type === 'allow') return !(fs?.length ? fs.some(f => !TG.folderLocked(F, folders, f.id)) : (F.allow || []).includes('__unsorted') && fs);
     return !!fs?.length && fs.some(f => TG.folderLocked(F, folders, f.id));
   },
@@ -187,8 +212,8 @@ const TG = {
   COLORS: ['#e53935', '#fb8c00', '#fdd835', '#43a047', '#00acc1', '#1e88e5', '#8e24aa', '#ec407a', '#6d4c41', '#757575'],
 
   async load() {
-    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, hideWatched, recKind, newOff, recMode, sFolder, sText, laterOff } =
-      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'hideWatched', 'recKind', 'newOff', 'recMode', 'sFolder', 'sText', 'laterOff']);
+    let { channels, folders, groups, meta, activeGroup, feedType, cols, homeCols, homeShortCols, searchCols, searchShortCols, hideWatched, recKind, newOff, recMode, sFolder, sText, laterOff, zeroView } =
+      await chrome.storage.local.get(['channels', 'folders', 'groups', 'meta', 'activeGroup', 'feedType', 'cols', 'homeCols', 'homeShortCols', 'searchCols', 'searchShortCols', 'hideWatched', 'recKind', 'newOff', 'recMode', 'sFolder', 'sText', 'laterOff', 'zeroView']);
     if (!folders && Array.isArray(groups)) {
       channels = {};
       folders = groups.map(g => {
@@ -210,22 +235,25 @@ const TG = {
       // 未設定なら 動画3列・ショート5列。「自動」を選ぶと null が保存される
       homeCols: homeCols === null ? null : homeCols >= 3 && homeCols <= 7 ? homeCols : 3,
       homeShortCols: homeShortCols === null ? null : homeShortCols >= 3 && homeShortCols <= 7 ? homeShortCols : 5,
+      // 検索結果：未設定なら 動画4列・ショート6列。「リスト」（YouTubeのまま）は null
+      searchCols: searchCols === null ? null : searchCols >= 2 && searchCols <= 7 ? searchCols : 4,
+      searchShortCols: searchShortCols === null ? null : searchShortCols >= 3 && searchShortCols <= 8 ? searchShortCols : 6,
       hideWatched: !!hideWatched,
       recKind: recKind === 'short' ? 'short' : 'video',
-      recMode: recMode === 'search' ? 'search' : 'rec', sFolder: sFolder || '', sText: sText || '',
+      recMode: recMode === 'search' ? 'search' : 'rec', sFolder: sFolder || '', sText: sText || '', zeroView: !!zeroView,
       newOff: Array.isArray(newOff) ? newOff : [], // 新着動画で隠すカテゴリ（トップのフォルダID / '__unsorted'）
       laterOff: Array.isArray(laterOff) ? laterOff : [] // 後で見るで隠すカテゴリ（＋ '__other'＝登録していないチャンネル）
     };
   },
 
   // ---------- バックアップ（エクスポート / インポート） ----------
-  SYNC_KEYS: ['channels', 'folders', 'meta', 'savedAt', 'cols', 'feedType', 'homeCols', 'homeShortCols', 'hideWatched'],
+  SYNC_KEYS: ['channels', 'folders', 'meta', 'savedAt', 'cols', 'feedType', 'homeCols', 'homeShortCols', 'searchCols', 'searchShortCols', 'hideWatched'],
 
   // 保存の種類（Drive・ファイル共通）
   AUX: {
-    history: ['history', 'daily', 'watched', 'ytHistSeen'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
+    history: ['history', 'daily', 'watched', 'ytHistSeen', 'dayCh', 'dayHr', 'dayYt'], // 視聴記録・視聴済み（履歴の取り込み済み印も）
     later: ['later', 'laterRemoved', 'bookmarks', 'bmRemoved'],                      // 後で見る（外した記録も）
-    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'cmOpen', 'pickMode', 'notifyRules', 'focus', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
+    prefs: ['notifyFolders', 'cmt', 'assistOn', 'mgrThumbs', 'mgrThumbCount', 'statsPeriod', 'rydOn', 'ytHistOn', 'assistRules', 'recKind', 'statsTheme', 'wlSort', 'newOff', 'laterOff', 'recPrefs', 'cmOpen', 'pickMode', 'notifyRules', 'focus', 'folderGoals', 'sleepWin', 'cchap', 'px', 'folderRates', 'chSet', 'prefsAt'] // その他の設定（prefsAt＝最後に変えた時刻）
   },
 
   // opts: { meta, history, later, prefs }（省略時はすべて含める）
@@ -237,7 +265,7 @@ const TG = {
     const out = {
       app: TG.APP, format: 3, exportedAt: Date.now(), savedAt: d.savedAt || Date.now(),
       channels: d.channels || {}, folders: d.folders || [],
-      settings: { cols: d.cols, feedType: d.feedType, homeCols: d.homeCols, homeShortCols: d.homeShortCols, hideWatched: d.hideWatched },
+      settings: { cols: d.cols, feedType: d.feedType, homeCols: d.homeCols, homeShortCols: d.homeShortCols, searchCols: d.searchCols, searchShortCols: d.searchShortCols, hideWatched: d.hideWatched },
       aux: {}
     };
     if (inc('meta')) out.meta = d.meta || {};
@@ -271,6 +299,16 @@ const TG = {
         for (const [d, sec] of Object.entries(h.daily)) out[d] = Math.max(out[d] || 0, sec);
         set.daily = out;
       }
+      // 日・チャンネル／時間ごとの視聴秒：それぞれ多いほうを使う
+      for (const key of ['dayCh', 'dayHr', 'dayYt']) {
+        if (!h[key]) continue;
+        const out = structuredClone(L[key] || {});
+        for (const [d, o] of Object.entries(h[key])) {
+          const t = (out[d] ||= {});
+          for (const [k, sec] of Object.entries(o || {})) t[k] = Math.max(t[k] || 0, sec);
+        }
+        set[key] = out;
+      }
       if (h.ytHistSeen) set.ytHistSeen = { ...(L.ytHistSeen || {}), ...h.ytHistSeen };
       if (h.watched) {
         const out = { ...(L.watched || {}) };
@@ -298,7 +336,13 @@ const TG = {
       if (lt.bookmarks || lt.bmRemoved) {
         const rm = { ...(L.bmRemoved || {}), ...(lt.bmRemoved || {}) };
         const bm = new Map();
-        for (const x of [...(L.bookmarks || []), ...(lt.bookmarks || [])]) if (x?.id && !rm[x.id]) bm.set(x.id, { ...(bm.get(x.id) || {}), ...x });
+        for (const x of [...(L.bookmarks || []), ...(lt.bookmarks || [])]) if (x?.id && !rm[x.id]) {
+          const cur = bm.get(x.id) || {};
+          const m = { ...cur, ...x };
+          // メモは新しく書いたほうを残す
+          if ((cur.noteAt || 0) > (x.noteAt || 0)) { m.note = cur.note; m.noteAt = cur.noteAt; }
+          bm.set(x.id, m);
+        }
         set.bookmarks = [...bm.values()].sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 3000);
         set.bmRemoved = Object.fromEntries(Object.entries(rm).filter(([, at]) => at > cut));
       }

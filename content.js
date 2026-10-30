@@ -245,6 +245,7 @@
       renderGuide(true);
       renderSubsPage(true);
       window.scrollTo({ top: 0 });
+      setTimeout(() => { if (isSubsFeed() && !document.querySelector('#tg-feed .tg-grid')) renderSubsPage(true); }, 1500);
       return;
     }
     // YouTube内の移動（サイドバーの「登録チャンネル」のリンクを使う）。見えるリンクを優先し、だめならページごと移動
@@ -252,6 +253,12 @@
     const link = links.find(l => l.offsetParent !== null && l.getBoundingClientRect().width > 0) || links[0];
     if (link) link.click();
     setTimeout(() => { if (!isSubsFeed()) location.assign('/feed/subscriptions'); }, link ? 1500 : 0);
+    // 移動したのに一覧が出ていなければ作り直す（それでもだめならページごと読み込み直す）
+    setTimeout(() => {
+      if (!isSubsFeed()) return;
+      if (!document.querySelector('#tg-feed .tg-grid')) { renderGuide(true); renderSubsPage(true); }
+      setTimeout(() => { if (isSubsFeed() && !document.querySelector('#tg-feed .tg-grid')) { TG.log('画面', '登録チャンネル画面が出ないので読み込み直します', 'warn'); location.reload(); } }, 2000);
+    }, 1800);
   }
 
   // ---------- 登録チャンネル画面（独自一覧に置き換え） ----------
@@ -367,6 +374,166 @@
     if (!recPrefs) S.folders.filter(f => !f.parent).forEach(f => { if (/国内/.test(f.name)) w[f.id] = 3; else if (/海外/.test(f.name)) w[f.id] = 0.3; });
     recPrefsCache = { jp: recPrefs?.jp ?? 0.9, w };
   }
+  // ---------- おすすめ：再生数の上限・好みのタグで探す ----------
+  let viewCapNow = 0, tagPrefs = null, tagRot = 0;
+  chrome.storage.local.get(['viewCap', 'tagPrefs']).then(r => { viewCapNow = +r.viewCap || 0; tagPrefs = r.tagPrefs || null; });
+  // よく見たチャンネルの上位の動画から、投稿者が設定したタグを集めて数える
+  async function collectTags() {
+    const { history = {}, tagCache = {} } = await chrome.storage.local.get(['history', 'tagCache']);
+    const byCh = new Map();
+    for (const [v, h] of Object.entries(history)) {
+      if (!h.k || h.short || !(h.sec > 30)) continue;
+      const e = byCh.get(h.k) || { sec: 0, vids: [] };
+      e.sec += h.sec; e.vids.push([v, h.sec]); byCh.set(h.k, e);
+    }
+    const tops = [...byCh.entries()].sort((a, b) => b[1].sec - a[1].sec).slice(0, 10);
+    const vids = tops.flatMap(([, e]) => e.vids.sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]));
+    const need = vids.filter(v => !tagCache[v]);
+    const bar = document.getElementById('tg-bar');
+    let done = 0;
+    const q = [...need];
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      while (q.length) {
+        const v = q.shift();
+        try { const o = await YTAPI.videoOwner(v); tagCache[v] = (o?.kw || []).slice(0, 40); } catch { tagCache[v] = []; }
+        done++;
+        const st = document.querySelector('#tg-feed .tg-feed-status');
+        if (st) st.textContent = `よく見た動画のタグを集計中… ${done} / ${need.length}`;
+      }
+    }));
+    const keys = Object.keys(tagCache);
+    if (keys.length > 600) keys.slice(0, keys.length - 600).forEach(k => delete tagCache[k]);
+    const chNames = new Set(Object.values(S.channels).map(c => (c.name || '').toLowerCase()));
+    const count = new Map();
+    for (const v of vids) {
+      const seen = new Set();
+      for (let t of tagCache[v] || []) {
+        t = t.trim(); const k = t.toLowerCase();
+        if (t.length < 2 || t.length > 20 || seen.has(k) || chNames.has(k) || /^(youtube|video|動画|vlog|shorts?)$/i.test(t)) continue;
+        seen.add(k);
+        const e = count.get(k) || { t, n: 0 }; e.n++; count.set(k, e);
+      }
+    }
+    const tags = [...count.values()].filter(x => x.n >= 2).sort((a, b) => b.n - a.n).slice(0, 20).map(x => [x.t, x.n]);
+    tagPrefs = { at: Date.now(), tags, from: vids.length };
+    await chrome.storage.local.set({ tagCache, tagPrefs });
+    TG.log('おすすめ', `よく見た ${vids.length} 本の動画のタグを集計：${tags.slice(0, 6).map(x => x[0]).join('・')}`);
+    return tagPrefs;
+  }
+  async function tagSearch(single) {
+    if (!single && (!tagPrefs?.tags?.length || Date.now() - tagPrefs.at > 864e5 || tagRot > 0)) {
+      if (!tagPrefs?.tags?.length || Date.now() - tagPrefs.at > 864e5) await collectTags();
+    }
+    const tags = (tagPrefs?.tags || []).map(x => x[0]);
+    if (!single && !tags.length) { const st = document.querySelector('#tg-feed .tg-feed-status'); if (st) st.textContent = '集計できるタグが見つかりませんでした（視聴記録が少ないか、タグの無い動画が多いようです）'; return; }
+    // 1つをタイトルに必ず含め（intitle:）、ほかの2つはどちらか
+    let sText;
+    if (single) sText = `intitle:"${single}"`;
+    else {
+      const i = tagRot++ % Math.max(1, tags.length);
+      const others = tags.filter((_, k) => k !== i).slice(tagRot % 3, tagRot % 3 + 2);
+      sText = `intitle:"${tags[i]}" ${others.map(t => (/\s/.test(t) ? `"${t}"` : t)).join(' | ')}`.trim();
+    }
+    const patch = { feedType: 'rec', recMode: 'search', sFolder: '', sText, recKind: 'video' };
+    Object.assign(S, patch);
+    await chrome.storage.local.set(patch);
+    const bar = document.getElementById('tg-bar');
+    if (bar) { buildBar(bar); layoutBar(); }
+    window.scrollTo({ top: 0 });
+    TGFeed.refresh(S, { force: true });
+  }
+
+  // ---------- 🔭 ゼロビュー・🌐 他言語で検索 ----------
+  const SEEDS = ['vlog', 'test', 'my first video', 'unboxing', 'review', 'cooking', 'cat', 'game', '日常', '練習'];
+  async function seedWord() {
+    const t = tagPrefs?.tags?.map(x => x[0]) || [];
+    const f = S.folders.map(x => x.name);
+    const pool = t.length ? t : f.length ? f : SEEDS;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+  async function zeroView(on) {
+    const patch = { zeroView: on, feedType: 'rec' };
+    if (on) Object.assign(patch, { recMode: 'search', recKind: 'video', ...(S.sText || S.sFolder ? {} : { sText: await seedWord() }) });
+    Object.assign(S, patch);
+    await chrome.storage.local.set(patch);
+    const bar = document.getElementById('tg-bar');
+    if (bar) { buildBar(bar); layoutBar(); }
+    window.scrollTo({ top: 0 });
+    TGFeed.refresh(S, { force: true });
+  }
+  const LANGS = [['th', 'タイ語'], ['es', 'スペイン語'], ['pt', 'ポルトガル語'], ['ko', '韓国語'], ['vi', 'ベトナム語'], ['id', 'インドネシア語'], ['fr', 'フランス語'], ['de', 'ドイツ語'], ['tr', 'トルコ語'], ['ru', 'ロシア語'], ['ar', 'アラビア語'], ['hi', 'ヒンディー語'], ['it', 'イタリア語'], ['pl', 'ポーランド語'], ['fil', 'フィリピン語']];
+  async function translateRandom(text) {
+    const [to, name] = LANGS[Math.floor(Math.random() * LANGS.length)];
+    const out = await chrome.runtime.sendMessage({ type: 'translate', q: text, to }).catch(() => null);
+    return out ? { text: out, to, name } : null;
+  }
+  async function xlangSearch() {
+    const src = document.querySelector('#tg-bar .tg-sq')?.value.trim() || (S.sText || '').replace(/intitle:|"/g, '').trim() || await seedWord();
+    const st = document.querySelector('#tg-feed .tg-feed-status');
+    if (st) st.textContent = `「${src}」を外国語にしています…`;
+    const r = await translateRandom(src.split('|')[0].trim());
+    if (!r) { if (st) st.textContent = '翻訳できませんでした'; return; }
+    TG.log('検索', `「${src}」→ ${r.name}「${r.text}」で検索`);
+    const patch = { feedType: 'rec', recMode: 'search', sFolder: '', sText: r.text };
+    Object.assign(S, patch);
+    await chrome.storage.local.set(patch);
+    const bar = document.getElementById('tg-bar');
+    if (bar) { buildBar(bar); layoutBar(); }
+    TGFeed.refresh(S, { force: true });
+    setTimeout(() => { const s2 = document.querySelector('#tg-feed .tg-feed-status'); if (s2) s2.textContent = `🌐 ${r.name}：「${src}」→「${r.text}」　` + s2.textContent; }, 1500);
+  }
+  // YouTube の検索欄の横に 🌐（入力した言葉をランダムな外国語にして検索）
+  function renderXlangBtn() {
+    const box = document.querySelector('ytd-masthead yt-searchbox, ytd-masthead ytd-searchbox, ytd-masthead #search-form');
+    if (!box || box.querySelector('.tg-xl')) return;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'tg-xl';
+    b.title = '入力した言葉をランダムな外国語に翻訳して検索（異文化の動画を探す）';
+    b.textContent = '🌐';
+    b.addEventListener('click', async e => {
+      e.preventDefault(); e.stopPropagation();
+      const inp = box.querySelector('input[name="search_query"], input.ytSearchboxComponentInput, input:not([type="file"])');
+      const src = inp?.value.trim() || await seedWord();
+      b.textContent = '…';
+      const r = await translateRandom(src);
+      b.textContent = '🌐';
+      if (!r) { toastMsg('翻訳できませんでした'); return; }
+      toastMsg(`🌐 ${r.name}：「${src}」→「${r.text}」`);
+      TG.log('検索', `「${src}」→ ${r.name}「${r.text}」で検索`);
+      location.assign('/results?search_query=' + encodeURIComponent(r.text));
+    });
+    box.appendChild(b);
+  }
+  // YouTube の検索結果を「低評価の割合が高い順」に並べ替える
+  async function chaosYt() {
+    const secs = [...document.querySelectorAll('ytd-search ytd-item-section-renderer > #contents')];
+    const vids = secs.flatMap(c => [...c.children].map(el => ({ el, v: (el.querySelector('a[href*="watch?v="]')?.getAttribute('href') || '').match(/[?&]v=([\w-]{11})/)?.[1] })).filter(x => x.v && /VIDEO-RENDERER|LOCKUP/i.test(x.el.tagName)));
+    if (!vids.length) return toastMsg('並べ替える動画がありません');
+    toastMsg(`🔥 ${vids.length} 本の賛否を調べています…`);
+    const q = [...vids];
+    await Promise.all(Array.from({ length: 6 }, async () => {
+      while (q.length) {
+        const x = q.shift();
+        const r = await chrome.runtime.sendMessage({ type: 'ryd', v: x.v }).catch(() => null);
+        x.ratio = r && r.likes + r.dislikes >= 5 ? r.dislikes / (r.likes + r.dislikes) : -1;
+      }
+    }));
+    for (const c of secs) {
+      if (getComputedStyle(c).display === 'block') c.style.setProperty('display', 'flex', 'important'), c.style.setProperty('flex-direction', 'column');
+      [...c.children].forEach(el => { const x = vids.find(y => y.el === el); el.style.order = x ? String(Math.round((1 - Math.max(0, x.ratio)) * 1000)) : '5000'; });
+    }
+    vids.forEach(x => {
+      x.el.querySelector('.tg-chaos-b')?.remove();
+      if (x.ratio < 0) return;
+      const t = x.el.querySelector('#video-title, h3');
+      t?.insertAdjacentHTML('afterbegin', `<span class="tg-chaos-b">👎 ${Math.round(x.ratio * 100)}%</span>`);
+    });
+    window.scrollTo({ top: 0 });
+    toastMsg('🔥 低評価の割合が高い順に並べました（推定値）');
+    TG.log('検索', `検索結果 ${vids.length} 本を賛否両論順に並べ替え`);
+  }
+
   function buildBar(bar) {
     // 表示の種類・フォルダが変わったら絞り込みを解除
     const key = S.feedType + '|' + (['rec', 'later', 'new', 'bm'].includes(S.feedType) ? '' : S.activeGroup);
@@ -423,7 +590,12 @@
       const kindSeg = `<div class="tg-seg" title="動画／ショート">${seg('data-reckind', 'video', '動画', S.recKind !== 'short')}${seg('data-reckind', 'short', 'ショート', S.recKind === 'short')}</div>`;
       const modeSeg = `<div class="tg-seg">${seg('data-recmode', 'rec', `${IC.rec}おすすめ`, !srch)}${seg('data-recmode', 'search', '🔍 お気に入り以外を検索', srch)}</div>`;
       row2 = `<div class="tg-chips tg-folders">${modeSeg}${kindSeg}<span class="tg-sub-lb">${srch ? '登録していないチャンネルから探す' : '未登録チャンネルのみ'}</span>
-        ${srch ? '' : '<button class="tg-chip tg-ghost" data-reload="1">更新</button>'}</div>`;
+        ${srch ? '' : '<button class="tg-chip tg-ghost" data-reload="1">更新</button>'}
+        <label class="tg-chip tg-ghost tg-vcap" title="再生数が多い（すでに人気の）動画を隠して、埋もれた動画だけを出す">📉 再生数<select data-vcap="1">${[[0, '上限なし'], [1000, '1千回未満'], [10000, '1万回未満'], [100000, '10万回未満']].map(([v, l]) => `<option value="${v}" ${viewCapNow === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <button class="tg-chip tg-ghost" data-tagsearch="1" title="よく見たチャンネルの動画のタグを集計して、まだ登録していないチャンネルを探す">🏷 好みのタグで探す</button>
+        <button class="tg-chip ${S.zeroView ? 'tg-focus' : 'tg-ghost'}" data-zero="1" title="1時間以内に投稿された、再生100回未満の動画だけを探す（誰にも見つかっていない動画）">🔭 ゼロビュー${S.zeroView ? '中' : ''}</button>
+        <button class="tg-chip tg-ghost" data-chaos="1" title="低評価の割合が高い順に並べ替える（Return YouTube Dislike の推定値）">🔥 賛否両論順</button>
+        <button class="tg-chip ${histOn() ? 'tg-focus' : 'tg-ghost'}" data-hist="1" title="一時的に視聴履歴に残さない">${histLabel()}</button></div>`;
       if (!srch && recPrefsOpen && recPrefsCache) {
         const P = recPrefsCache;
         const WL = [[3, '多め'], [1, '普通'], [0.3, '少なめ'], [0, '使わない']];
@@ -448,8 +620,10 @@
         row2 += `<div class="tg-chips tg-sub tg-search">
           <label class="tg-qbox tg-sbox"><span>🔍</span><input class="tg-sq" type="search" placeholder="キーワード（空ならフォルダのタグで探す）" value="${esc(S.sText)}"></label>
           <button class="tg-chip tg-play" data-dosearch="1">検索</button>
+          <button class="tg-chip tg-ghost" data-xlang="1" title="キーワード（空なら好みのタグ）をランダムな外国語に翻訳して探す">🌐 他言語で</button>
           <span class="tg-sub-lb">フォルダ：</span>${fchips}
           ${subs ? `<div class="tg-chips tg-sub2">${subs}</div>` : ''}
+          ${tagPrefs?.tags?.length ? `<div class="tg-chips tg-sub2 tg-tagpref"><span class="tg-sub-lb">🏷 好みのタグ（よく見た動画から）：</span>${tagPrefs.tags.slice(0, 12).map(([t, n]) => `<button class="tg-chip" data-tagq="${esc(t)}" title="${n}本の動画に付いていたタグ。押すとタイトルにこの言葉を含む動画を探す">${esc(t)}<small>${n}</small></button>`).join('')}<button class="tg-chip tg-ghost" data-tagsearch="1" title="集計し直して別の組み合わせで探す">↻ 別の組み合わせ</button></div>` : ''}
           <div class="tg-sq-hint">${q ? `検索語：<code>${esc(q)}</code>　（フォルダ名＋振り分け補助のキーワード🏷。🏷は「フォルダ設定」で編集）` : 'キーワードを入れるか、フォルダを選んでください'}</div></div>`;
       }
       cur = null; curName = srch ? '検索' : 'おすすめ'; totalNew = 0;
@@ -486,6 +660,11 @@
       <button class="tg-index" data-fold="1" aria-expanded="${!folded}" title="フォルダの表示／非表示">
         ${cur?.color ? `<i class="tg-cdot" style="background:${esc(cur.color)}"></i>` : '📁'}<span>${esc(curName)}</span>${badge(totalNew)}<b class="tg-caret">▾</b></button>`;
     if (keepFocus) { const i = bar.querySelector('.tg-q'); i?.focus(); try { i?.setSelectionRange(...keepFocus); } catch { /* なし */ } }
+    bar.querySelector('[data-vcap]')?.addEventListener('change', e => {
+      viewCapNow = +e.target.value || 0;
+      chrome.storage.local.set({ viewCap: viewCapNow });
+      TGFeed.setViewCap(viewCapNow);
+    });
   }
 
   // 連続再生：表示中の未視聴＋（フォルダ表示なら）そのフォルダの直近の新着、新しい順
@@ -522,7 +701,14 @@
     if (!b) return;
     if (b.dataset.manage) return TGManager.open();
     if (b.dataset.fold) { manualUntil = performance.now() + 700; setFolded(!folded); return; }
-    if (b.dataset.reload) return TGFeed.refresh(S, { force: true });
+    if (b.dataset.hist) return histMenu();
+    if (b.dataset.recreset) return recReset();
+    if (b.dataset.tagsearch) { b.disabled = true; b.textContent = '🏷 集計中…'; return tagSearch(); }
+    if (b.dataset.tagq) return tagSearch(b.dataset.tagq);
+    if (b.dataset.chaos) return TGFeed.chaosSort();
+    if (b.dataset.zero) return zeroView(!S.zeroView);
+    if (b.dataset.xlang) return xlangSearch();
+    if (b.dataset.reload) { window.scrollTo({ top: 0 }); return TGFeed.refresh(S, { force: true }); } // 更新したら一番上から
     if (b.dataset.recmode || b.dataset.discover || 'sf' in b.dataset || b.dataset.dosearch) {
       const patch = {};
       if (b.dataset.recmode) patch.recMode = b.dataset.recmode;
@@ -864,6 +1050,14 @@
     }
     if (b.dataset.v !== v) b.dataset.v = v;
     paintLaterBtn(b);
+    // フォルダ登録ボタン（📁＋）の左に並べる
+    const fab = document.getElementById('tg-fab');
+    const r = fab && getComputedStyle(fab).display !== 'none' ? fab.getBoundingClientRect() : null; // fixed の要素は offsetParent が null なので大きさで判定
+    if (r?.width) {
+      const right = Math.round(innerWidth - r.left + 8) + 'px', bottom = Math.round(innerHeight - r.bottom + (r.height - b.offsetHeight) / 2) + 'px';
+      if (b.style.right !== right) b.style.right = right;
+      if (b.style.bottom !== bottom) b.style.bottom = bottom;
+    } else { b.style.right = ''; b.style.bottom = ''; }
   }
 
   // 再生リスト・ミックス（束ねたサムネ）。ミックス・ステーションは最初の動画＋リストIDで「後で見る」に入れられる
@@ -874,6 +1068,24 @@
   };
   const isShortItem = item => item.matches('ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytd-reel-item-renderer') || !!item.querySelector('ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, a[href^="/shorts/"]');
   const META_SEL = 'yt-lockup-metadata-view-model, [class*="lockup-metadata" i], #meta, #details';
+  // チャンネル別の設定（chSet: { チャンネルキー: { s: 冒頭スキップ秒, e: 最後スキップ秒, mid: サムネを動画の途中の画面に } }）
+  let chSet = {};
+  chrome.storage.local.get('chSet').then(r => { chSet = r.chSet || {}; });
+  chrome.storage.onChanged.addListener(ch => { if (ch.chSet) { chSet = ch.chSet.newValue || {}; document.querySelectorAll('[data-tg-sig]').forEach(e => delete e.dataset.tgSig); markVideos(); } });
+  // サムネを動画の途中の画面（YouTubeが自動で作る mq2＝真ん中あたりのコマ）に差し替える。設定を外したら元に戻す
+  function midThumbs() {
+    for (const item of document.querySelectorAll('[data-tg-mid]')) {
+      const v = item.dataset.tgMid;
+      for (const img of item.querySelectorAll('ytd-thumbnail img, yt-thumbnail-view-model img, a#thumbnail img, .yt-core-image')) {
+        if (v === '-') { if (img.dataset.tgOrig) { img.src = img.dataset.tgOrig; delete img.dataset.tgOrig; } continue; }
+        if (!img.src || img.src.includes('/mq2.jpg') || img.closest('#avatar, yt-avatar-shape, yt-decorated-avatar-view-model')) continue;
+        img.dataset.tgOrig = img.src;
+        img.removeAttribute('srcset');
+        img.src = `https://i.ytimg.com/vi/${v}/mq2.jpg`;
+      }
+      if (v === '-') delete item.dataset.tgMid;
+    }
+  }
   function markVideos() {
     if (!favSet.size) return; // まだ登録チャンネルを読み込んでいない
     const app = document.querySelector('ytd-app');
@@ -924,9 +1136,12 @@
         lk = TG.channelLocked(FOCUS, S.folders, fs || (key && key !== '__other' && favSet.has(key) ? [] : null));
       }
       if (lk) item.dataset.tglock = '1'; else if (item.dataset.tglock) delete item.dataset.tglock;
+      const mid = key && lvid && !isShortItem(item) && chSet[key]?.mid;
+      if (mid) item.dataset.tgMid = lvid; else if (item.dataset.tgMid) item.dataset.tgMid = '-';
       if (item.parentElement?.closest(ITEM_SEL)) continue; // 入れ子は外側だけ
       placeRow(item, key, links, byName, lvid, '');
     }
+    midThumbs();
   }
   // チャンネル名の下に「🕒＋フォルダ名」の行。置き場所が無いもの（ショート等）はサムネの左上に🕒
   function placeRow(item, key, links, byName, lvid, list) {
@@ -1007,10 +1222,49 @@
       css += `${H} ytd-rich-grid-renderer { --ytd-rich-grid-items-per-row: ${S.homeCols} !important; }
         ${H} ytd-rich-grid-row, ${H} ytd-rich-grid-row > #contents { display: contents !important; }`;
     }
+    css += searchColsCss();
     if (st.textContent !== css) st.textContent = css;
     renderHomeTool();
     document.querySelectorAll('[data-tg-memo]').forEach(e => delete e.dataset.tgMemo);
     layoutHome();
+  }
+
+  // ---------- 検索結果の列数（動画は新着動画のようなカード、ショートは横に並べる） ----------
+  function searchColsCss() {
+    const R = 'ytd-search';
+    let css = '';
+    const N = S.searchCols, M = S.searchShortCols;
+    if (N) {
+      css += `
+      ${R} ytd-two-column-search-results-renderer, ${R} #container.ytd-search, ${R} ytd-two-column-search-results-renderer #primary { max-width: none !important; width: 100% !important; }
+      ${R} ytd-two-column-search-results-renderer #secondary { display: none !important; }
+      ${R} ytd-item-section-renderer > #contents, ${R} ytd-vertical-list-renderer #items {
+        display: grid !important; grid-template-columns: repeat(${N}, minmax(0, 1fr)); gap: 24px 16px; align-items: start; }
+      ${R} ytd-item-section-renderer > #contents > *:not(ytd-video-renderer):not(yt-lockup-view-model):not(ytd-movie-renderer) { grid-column: 1 / -1; min-width: 0; }
+      ${R} ytd-item-section-renderer > #contents > ytd-video-renderer, ${R} ytd-vertical-list-renderer #items > ytd-video-renderer { margin: 0 !important; max-width: none !important; min-width: 0; }
+      ${R} ytd-video-renderer #dismissible { flex-direction: column !important; }
+      ${R} ytd-video-renderer ytd-thumbnail.ytd-video-renderer, ${R} ytd-video-renderer ytd-thumbnail { width: 100% !important; max-width: none !important; min-width: 0 !important; flex: none !important; margin: 0 0 10px !important; }
+      ${R} ytd-video-renderer ytd-thumbnail #thumbnail { border-radius: 12px; }
+      ${R} ytd-video-renderer .text-wrapper { max-width: none !important; padding: 0 !important; }
+      ${R} ytd-video-renderer #video-title { font-size: 15px !important; line-height: 21px !important; max-height: 42px !important; -webkit-line-clamp: 2 !important; }
+      ${R} ytd-video-renderer #title-wrapper h3 { margin: 0 !important; }
+      ${R} ytd-video-renderer #channel-info { margin: 4px 0 0 !important; padding: 0 !important; }
+      ${R} ytd-video-renderer #channel-info #avatar { display: none !important; }
+      ${R} ytd-video-renderer .metadata-snippet-container, ${R} ytd-video-renderer #description-text, ${R} ytd-video-renderer ytd-badge-supported-renderer.ytd-video-renderer:not([system-icons]) { display: none !important; }
+      ${R} ytd-video-renderer #expandable-metadata { display: none !important; }
+      ${R} ytd-item-section-renderer > #contents > yt-lockup-view-model .yt-lockup-view-model--horizontal, ${R} ytd-item-section-renderer > #contents > yt-lockup-view-model > div { flex-direction: column !important; }
+      ${R} ytd-item-section-renderer > #contents > yt-lockup-view-model .yt-lockup-view-model__content-image { width: 100% !important; max-width: none !important; margin: 0 0 10px !important; }`;
+    }
+    if (M) {
+      css += `
+      ${R} ytd-reel-shelf-renderer yt-horizontal-list-renderer #items, ${R} grid-shelf-view-model .ytGridShelfViewModelGridShelfRow {
+        display: grid !important; grid-template-columns: repeat(${M}, minmax(0, 1fr)) !important; gap: 16px 12px !important; transform: none !important; width: auto !important; }
+      ${R} ytd-reel-shelf-renderer yt-horizontal-list-renderer #items > *, ${R} grid-shelf-view-model .ytGridShelfViewModelGridShelfItem {
+        width: auto !important; min-width: 0 !important; max-width: none !important; margin: 0 !important; }
+      ${R} ytd-reel-shelf-renderer yt-horizontal-list-renderer #left-arrow, ${R} ytd-reel-shelf-renderer yt-horizontal-list-renderer #right-arrow { display: none !important; }
+      ${R} ytd-reel-shelf-renderer yt-horizontal-list-renderer #scroll-container { overflow: visible !important; }`;
+    }
+    return css;
   }
 
   // 拡張機能が上書きしたスタイルだけを記録し、「自動」に戻すときはYouTube自身の値に戻す
@@ -1076,10 +1330,69 @@
     });
   }
 
+  // ---------- 履歴オフ（一時的に YouTube の視聴履歴に残さない）・おすすめのリセット ----------
+  let HO = { on: false };
+  const histOn = () => !!HO.on && (!HO.until || HO.until > Date.now());
+  chrome.storage.local.get('histOff').then(r => { HO = r.histOff || { on: false }; renderHomeTool(); });
+  chrome.storage.onChanged.addListener(ch => { if (ch.histOff) { HO = ch.histOff.newValue || { on: false }; renderHomeTool(); const bar = document.getElementById('tg-bar'); if (bar && S.feedType === 'rec') buildBar(bar); } });
+  const hhmm = t => new Date(t).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  const histLabel = () => histOn() ? `🕶 履歴オフ中${HO.until ? '（〜' + hhmm(HO.until) + '）' : ''}` : '🕶 履歴オフ';
+  function tgDialog(html, onClick) {
+    document.getElementById('tg-dlg')?.remove();
+    const d = document.createElement('div');
+    d.id = 'tg-dlg';
+    d.innerHTML = `<div class="tg-dlg-box">${html}<button class="tg-dlg-x" data-x="1">✕</button></div>`;
+    d.addEventListener('click', e => {
+      if (e.target === d || e.target.closest('[data-x]')) { d.remove(); return; }
+      const b = e.target.closest('button[data-a]');
+      if (b) onClick(b.dataset.a, d);
+    });
+    document.body.appendChild(d);
+  }
+  function histMenu() {
+    if (histOn()) {
+      chrome.storage.local.set({ histOff: { on: false } });
+      TG.log('履歴オフ', '履歴を元に戻しました');
+      return toastMsg('🕶 視聴履歴の記録を元に戻しました');
+    }
+    tgDialog(`<div class="tg-dlg-t">🕶 一時的に視聴履歴に残さない</div>
+      <p>この間に見た動画は、YouTubeの「再生履歴」とTubeFolioの視聴記録に残りません（おすすめに影響しにくくなります）。<br>YouTubeの設定そのものは変えません。</p>
+      <div class="tg-dlg-btns">${[[30, '30分'], [60, '1時間'], [180, '3時間'], [0, '元に戻すまで']].map(([m, l]) => `<button data-a="${m}">${l}</button>`).join('')}</div>`, (a, d) => {
+      const m = +a;
+      chrome.storage.local.set({ histOff: { on: true, until: m ? Date.now() + m * 60e3 : 0, at: Date.now() } });
+      TG.log('履歴オフ', m ? `${m}分間、視聴履歴に残さない` : '元に戻すまで視聴履歴に残さない');
+      d.remove();
+      toastMsg(`🕶 ${m ? m + '分間' : '元に戻すまで'}、視聴履歴に残しません`);
+    });
+  }
+  function recReset() {
+    tgDialog(`<div class="tg-dlg-t">↺ おすすめをリセット</div>
+      <div class="tg-dlg-opt"><b>TubeFolioのおすすめ</b><p>これまでに出したおすすめの記録を消して、まっさらな状態から出し直します。</p><button data-a="tf">TubeFolioのおすすめをリセット</button></div>
+      <div class="tg-dlg-opt"><b>YouTubeのおすすめ</b><p>YouTubeのおすすめは、再生履歴と検索履歴から作られています。履歴の画面で「すべての再生履歴を削除」（必要なら検索履歴も）を押すと、おすすめがリセットされます。これはGoogleアカウントの操作なので、ご自身で押してください（元に戻せません）。</p><button data-a="yt">YouTubeの履歴の画面を開く</button></div>
+      <div class="tg-dlg-opt"><b>今から影響させない</b><p>しばらく視聴履歴に残さずに見ることもできます。</p><button data-a="off">🕶 履歴オフにする</button></div>`, async (a, d) => {
+      if (a === 'tf') {
+        await chrome.storage.local.remove(['recSeen']);
+        TG.log('おすすめ', 'TubeFolioのおすすめの記録をリセット');
+        d.remove(); toastMsg('↺ TubeFolioのおすすめをリセットしました');
+        if (isSubsFeed() && S.feedType === 'rec') { window.scrollTo({ top: 0 }); TGFeed.refresh(S, { force: true }); }
+      }
+      if (a === 'yt') { d.remove(); window.open('https://www.youtube.com/feed/history', '_blank'); }
+      if (a === 'off') { d.remove(); histMenu(); }
+    });
+  }
+  function toastMsg(text) {
+    document.getElementById('tg-mini-toast')?.remove();
+    const t = document.createElement('div');
+    t.id = 'tg-mini-toast'; t.textContent = text;
+    document.body.appendChild(t);
+    setTimeout(() => t.classList.add('out'), 2500);
+    setTimeout(() => t.remove(), 3100);
+  }
+
   function renderHomeTool() {
-    const isHome = location.pathname === '/';
+    const isHome = location.pathname === '/', isSearch = location.pathname === '/results';
     let tool = document.getElementById('tg-hometool');
-    if (!isHome) { tool?.remove(); return; }
+    if (!isHome && !isSearch) { tool?.remove(); return; }
     if (!tool) {
       tool = document.createElement('div');
       tool.id = 'tg-hometool';
@@ -1087,18 +1400,26 @@
         const b = e.target.closest('button');
         if (!b) return;
         if (b.dataset.toggle) { tool.classList.toggle('open'); return; }
+        if (b.dataset.hist) return histMenu();
+        if (b.dataset.recreset) return recReset();
+        if (b.dataset.chaosyt) return chaosYt();
         const v = b.dataset.v === '' ? null : +b.dataset.v;
         await chrome.storage.local.set({ [b.dataset.k]: v });
       });
       document.body.appendChild(tool);
     }
-    const seg = (k, cur) => ['', 3, 4, 5, 6, 7].map(n =>
-      `<button class="tg-seg-btn ${(cur ?? '') === n ? 'tg-active' : ''}" data-k="${k}" data-v="${n}">${n === '' ? '自動' : n}</button>`).join('');
+    const seg = (k, cur, list, auto = '自動') => list.map(n =>
+      `<button class="tg-seg-btn ${(cur ?? '') === n ? 'tg-active' : ''}" data-k="${k}" data-v="${n}">${n === '' ? auto : n}</button>`).join('');
     const open = tool.classList.contains('open');
-    const html = `<button class="tg-ht-btn" data-toggle="1" title="ホームの列数">${IC.grid}<span>列</span></button>
+    const html = isHome ? `<div class="tg-ht-main"><button class="tg-ht-btn tg-ht-act ${histOn() ? 'on' : ''}" data-hist="1" title="一時的に視聴履歴に残さない">${histLabel()}</button><button class="tg-ht-btn" data-toggle="1" title="ホームの列数">${IC.grid}<span>列</span></button></div>
       <div class="tg-ht-panel">
-        <div class="tg-ht-row"><span>動画</span><div class="tg-seg">${seg('homeCols', S.homeCols)}</div></div>
-        <div class="tg-ht-row"><span>ショート</span><div class="tg-seg">${seg('homeShortCols', S.homeShortCols)}</div></div>
+        <div class="tg-ht-row"><span>動画</span><div class="tg-seg">${seg('homeCols', S.homeCols, ['', 3, 4, 5, 6, 7])}</div></div>
+        <div class="tg-ht-row"><span>ショート</span><div class="tg-seg">${seg('homeShortCols', S.homeShortCols, ['', 3, 4, 5, 6, 7])}</div></div>
+      </div>` : `<div class="tg-ht-main"><button class="tg-ht-btn tg-ht-act" data-chaosyt="1" title="低評価の割合が高い順に並べ替える（Return YouTube Dislike の推定値）">🔥 賛否両論順</button><button class="tg-ht-btn" data-toggle="1" title="検索結果の列数">${IC.grid}<span>列</span></button></div>
+      <div class="tg-ht-panel">
+        <div class="tg-ht-title">検索結果</div>
+        <div class="tg-ht-row"><span>動画</span><div class="tg-seg">${seg('searchCols', S.searchCols, ['', 2, 3, 4, 5, 6], 'リスト')}</div></div>
+        <div class="tg-ht-row"><span>ショート</span><div class="tg-seg">${seg('searchShortCols', S.searchShortCols, ['', 4, 5, 6, 7, 8], '自動')}</div></div>
       </div>`;
     if (tool.dataset.html !== html) { tool.innerHTML = html; tool.dataset.html = html; }
     tool.classList.toggle('open', open);
@@ -1165,6 +1486,7 @@
 
   function renderFab() {
     renderLaterFab();
+    renderXlangBtn();
     let fab = document.getElementById('tg-fab');
     if (!isChannelPage() && !isWatchPage() && !isShortsPage()) {
       fab?.remove();
@@ -1292,13 +1614,69 @@
     const sec = Math.floor(video.currentTime || 0);
     const ch = currentChannel();
     const title = (document.querySelector('ytd-watch-metadata h1, #title h1')?.textContent || document.title.replace(/ - YouTube$/, '')).trim();
+    const shot = grabFrame(video); // その瞬間の画面（サムネ用・このPCだけに保存）
+    const id = v + '@' + sec + '@' + Date.now().toString(36);
     const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
-    bookmarks.unshift({ id: v + '@' + sec + '@' + Date.now().toString(36), v, t: title, ch: ch?.name || '', k: ch?.key || '', sec, d: Math.round(video.duration || 0), at: Date.now() });
-    await chrome.storage.local.set({ bookmarks: bookmarks.slice(0, 3000) });
+    bookmarks.unshift({ id, v, t: title, ch: ch?.name || '', k: ch?.key || '', sec, d: Math.round(video.duration || 0), at: Date.now() });
+    await chrome.storage.local.set({ bookmarks: bookmarks.slice(0, 3000), ...(shot ? { ['bmt:' + id]: shot } : {}) });
+    // 概要欄はあとから取得して書き足す
+    YTAPI.videoText(v).then(async ({ desc }) => {
+      if (!desc) return;
+      const { bookmarks: bs = [] } = await chrome.storage.local.get('bookmarks');
+      const b = bs.find(x => x.id === id);
+      if (b) { b.desc = desc.slice(0, 1500); await chrome.storage.local.set({ bookmarks: bs }); }
+    }).catch(() => {});
     const mm = s => (s >= 3600 ? Math.floor(s / 3600) + ':' + String(Math.floor(s % 3600 / 60)).padStart(2, '0') : Math.floor(s / 60)) + ':' + String(s % 60).padStart(2, '0');
-    bmToast(`🔖 ${mm(sec)} をブックマークしました`);
+    bmMemo(id, `🔖 ${mm(sec)} をブックマークしました`);
     TG.log('ブックマーク', `${title}（${mm(sec)}）`);
   }, true);
+  // 1行メモ（Enterで保存・Escか空のままならメモなし）。動画はそのまま再生を続ける
+  function bmMemo(id, msg) {
+    document.getElementById('tg-bmtoast')?.remove();
+    const d = document.createElement('div');
+    d.id = 'tg-bmtoast';
+    d.className = 'tg-bmmemo';
+    d.innerHTML = `<div class="tg-bmm-h">${esc(msg)}</div><input class="tg-bmm-in" maxlength="120" placeholder="1行メモ（Enterで保存・Escでメモなし）">`;
+    (document.querySelector('#movie_player') || document.body).appendChild(d);
+    const inp = d.querySelector('input');
+    let closed = false;
+    const close = async save => {
+      if (closed) return;
+      closed = true;
+      const note = inp.value.trim();
+      if (save && note) {
+        const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
+        const b = bookmarks.find(x => x.id === id);
+        if (b) { b.note = note; b.noteAt = Date.now(); await chrome.storage.local.set({ bookmarks }); }
+        d.querySelector('.tg-bmm-h').textContent = '📝 メモを保存しました';
+        inp.remove();
+        setTimeout(() => d.classList.add('out'), 900);
+        setTimeout(() => d.remove(), 1500);
+      } else { d.classList.add('out'); setTimeout(() => d.remove(), 400); }
+      document.querySelector('#movie_player')?.focus?.();
+    };
+    ['keydown', 'keyup', 'keypress'].forEach(t => inp.addEventListener(t, ev => {
+      ev.stopPropagation();
+      if (t !== 'keydown' || ev.isComposing) return;
+      if (ev.key === 'Enter') { ev.preventDefault(); close(true); }
+      if (ev.key === 'Escape') { ev.preventDefault(); close(false); }
+    }));
+    ['click', 'mousedown', 'dblclick'].forEach(t => d.addEventListener(t, ev => ev.stopPropagation()));
+    inp.addEventListener('blur', () => setTimeout(() => close(true), 150));
+    setTimeout(() => inp.focus(), 30);
+    // 何も打たずに12秒たったら閉じる
+    setTimeout(() => { if (!closed && !inp.value) close(false); }, 12000);
+  }
+  function grabFrame(video) {
+    try {
+      const w = 480, h = Math.round(w * (video.videoHeight / video.videoWidth || 9 / 16));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(video, 0, 0, w, h);
+      const url = c.toDataURL('image/jpeg', 0.72);
+      return url.length > 1000 ? url : null;
+    } catch { return null; } // 取り込めない動画（保護されたもの）は通常のサムネ
+  }
   function bmToast(msg) {
     document.getElementById('tg-bmtoast')?.remove();
     const d = document.createElement('div');
@@ -1349,10 +1727,12 @@
       const bar = document.getElementById('tg-bar');
       if (bar) buildBar(bar);
     }
-    if (changes.homeCols || changes.homeShortCols) {
+    if (changes.homeCols || changes.homeShortCols || changes.searchCols || changes.searchShortCols) {
       const d = await TG.load();
       S.homeCols = d.homeCols;
       S.homeShortCols = d.homeShortCols;
+      S.searchCols = d.searchCols;
+      S.searchShortCols = d.searchShortCols;
       applyHomeCols();
     }
     if (changes.focus && !(changes.channels || changes.folders || changes.activeGroup || changes.feedType)) {
@@ -1403,7 +1783,7 @@
   // ---------- 視聴記録（視聴時間・再生数・高評価数・自分の評価） ----------
   //   history: { 動画ID: { t, ch, k, d:長さ秒, first, last, sec:見た秒数, views, likes, rate:'like'|'dislike'|'' , short } }
   //   daily:   { 'YYYY-MM-DD': 見た秒数 }
-  let hPending = {}, hDaily = {}, hSaveT = null;
+  let hPending = {}, hDaily = {}, hSlot = {}, hSaveT = null; // hSlot … 日・時間・チャンネルごとの視聴秒（視聴パターン用）
   function readWatchMeta(id) {
     const isShort = location.pathname.startsWith('/shorts/');
     const meta = document.querySelector('ytd-watch-metadata');
@@ -1422,6 +1802,7 @@
   }
   let metaCache = { id: null, at: 0, m: null };
   function recordHistory(id, addSec, v) {
+    if (histOn()) return; // 履歴オフ中は TubeFolio の視聴記録にも残さない
     if (metaCache.id !== id || Date.now() - metaCache.at > 30000) metaCache = { id, at: Date.now(), m: readWatchMeta(id) };
     const m = metaCache.m;
     const e = (hPending[id] ||= { add: 0 });
@@ -1431,15 +1812,37 @@
     if (v?.duration > 0 && isFinite(v.duration)) e.d = Math.round(v.duration);
     const day = TG.dayKey();
     hDaily[day] = (hDaily[day] || 0) + addSec;
+    const hr = new Date().getHours(), ck = m.k || (m.ch ? '#' + m.ch : '');
+    const sd = (hSlot[day] ||= { c: {}, h: {} });
+    sd.c[ck] = (sd.c[ck] || 0) + addSec;
+    sd.h[hr] = (sd.h[hr] || 0) + addSec;
+    if (m.short) sd.h.s = (sd.h.s || 0) + addSec; // ショートの秒
+    // 集中モードの時間帯に見た秒（f）と、そのうち見えなくしているフォルダの秒（x＝脱線）
+    const fs = TG.focusState(FOCUS);
+    if (fs.active || fs.unlocked) {
+      sd.h.f = (sd.h.f || 0) + addSec;
+      if (m.k) {
+        const fl = TG.folderMap(S.channels, S.folders).get(m.k) || (S.channels[m.k] ? [] : null);
+        if (TG.channelLocked(FOCUS, S.folders, fl)) sd.h.x = (sd.h.x || 0) + addSec;
+      }
+    }
     if (!hSaveT) hSaveT = setTimeout(flushHistory, 30000);
   }
   async function flushHistory() {
     clearTimeout(hSaveT); hSaveT = null;
-    const add = hPending, daily = hDaily;
-    hPending = {}; hDaily = {};
+    const add = hPending, daily = hDaily, slot = hSlot;
+    hPending = {}; hDaily = {}; hSlot = {};
     if (!Object.keys(add).length && !Object.keys(daily).length) return;
-    const st = await chrome.storage.local.get(['history', 'daily']);
-    const history = st.history || {}, dd = st.daily || {};
+    const st = await chrome.storage.local.get(['history', 'daily', 'dayCh', 'dayHr']);
+    const history = st.history || {}, dd = st.daily || {}, dc = st.dayCh || {}, dh = st.dayHr || {};
+    for (const [d, x] of Object.entries(slot)) {
+      const c = (dc[d] ||= {}), h = (dh[d] ||= {});
+      for (const [k, sec] of Object.entries(x.c)) c[k] = (c[k] || 0) + sec;
+      for (const [k, sec] of Object.entries(x.h)) h[k] = (h[k] || 0) + sec;
+    }
+    // 視聴パターン用の記録は400日分
+    const cutDay = TG.dayKey(Date.now() - 400 * 864e5);
+    for (const o of [dc, dh]) for (const d of Object.keys(o)) if (d < cutDay) delete o[d];
     const now = Date.now();
     for (const [id, e] of Object.entries(add)) {
       const h = (history[id] ||= { first: now, sec: 0 });
@@ -1451,7 +1854,7 @@
     for (const [d, sec] of Object.entries(daily)) dd[d] = (dd[d] || 0) + sec;
     const ids = Object.keys(history);
     if (ids.length > 5000) ids.sort((a, b) => history[a].last - history[b].last).slice(0, ids.length - 5000).forEach(k => delete history[k]);
-    await chrome.storage.local.set({ history, daily: dd });
+    await chrome.storage.local.set({ history, daily: dd, dayCh: dc, dayHr: dh });
   }
 
   function trackWatch() {
@@ -1549,6 +1952,12 @@
     TGX.check({ force: !!m.force }).then(r => reply({ ok: true, ...r }), e => reply({ ok: false, error: e.message }));
     return true;
   });
+  // 再生画面の追加機能（playerx.js）から使う
+  globalThis.TGPage = {
+    currentChannel: () => (isWatchPage() ? currentChannel() : null), state: () => S,
+    histMenu, recReset, histOn, histLabel,
+    addToFolder: fid => { const ch = currentChannel(); return ch ? toggleMembership(fid, ch, true) : null; }
+  };
   // Google Drive 自動同期：開いたときに新しい方へ合わせる
   try { chrome.runtime.sendMessage({ type: 'drive', op: 'autoPull' }).catch(() => {}); } catch { /* 拡張機能の再読み込み直後など */ }
 })();

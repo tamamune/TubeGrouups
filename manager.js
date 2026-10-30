@@ -113,7 +113,7 @@ const TGManager = (() => {
     if (!ch.savedAt || ch.savedAt.newValue === st.savedAt || saveT || st.saving) return;
     const d = await TG.load();
     Object.assign(st, { channels: structuredClone(d.channels), folders: structuredClone(d.folders), savedAt: ch.savedAt.newValue });
-    if (st.view !== 'all' && st.view !== 'unsorted' && st.view !== 'hidden' && !st.folders.some(f => f.id === st.view)) st.view = 'all';
+    if (st.view !== 'all' && st.view !== 'unsorted' && !st.folders.some(f => f.id === st.view)) st.view = 'all';
     renderAll();
   }
 
@@ -182,7 +182,6 @@ const TGManager = (() => {
         <p class="help">フォルダを選ぶと、そのフォルダのチャンネルだけを表示します。<br>
           各チャンネルの下のボタンを押すとフォルダに出し入れできます（複数フォルダOK）。<br>
           フォルダはドラッグで並べ替え・ほかのフォルダの中へ移動できます。チャンネルをフォルダへドラッグして追加することもできます。<br>
-          チェックして「非表示」にしたチャンネルは、登録チャンネルの一覧に表示されなくなります（行の 👁 で戻せます）。<br>
           変更は自動で保存されます。</p>
       </aside>
       <main>
@@ -423,7 +422,6 @@ const TGManager = (() => {
     if (st.folders.length) h += '<div class="rootdrop">ここにドロップでトップ階層へ</div>';
     h += '<hr>';
     h += vi('unsorted', I.alert, '未分類', all.filter(c => !c.hidden && !inAny.has(c.key)).length);
-    h += vi('hidden', I.eyeOff, '非表示', all.filter(c => c.hidden).length);
     q('.views').innerHTML = h;
   }
 
@@ -848,8 +846,6 @@ const TGManager = (() => {
       ${st.folders.length ? `<select>${opts}</select>
       <button data-act="bulk-add" class="primary">フォルダに追加</button>
       <button data-act="bulk-remove">フォルダから外す</button>` : '<span class="muted">フォルダを作ると一括で振り分けできます</span>'}
-      <button data-act="bulk-hide">非表示</button>
-      <button data-act="bulk-show">表示に戻す</button>
       <button data-act="bulk-clear">選択解除</button>`;
   }
 
@@ -985,12 +981,26 @@ const TGManager = (() => {
         if (st.pop?.kind === 'settings') return hidePop();
         return openSettings();
       case 'settab': return openSettings(el.dataset.tab);
-      case 'fc-addslot': case 'fc-delslot': case 'fc-type': case 'fc-relock': {
+      case 'lg-lv': LG.level = el.dataset.v; LG.shown = 200; return openLogCfg();
+      case 'lg-more': LG.shown += 200; return openLogCfg();
+      case 'lg-clear':
+        if (!confirm('動作ログをすべて消去しますか？')) return;
+        await chrome.storage.local.set({ tgLog: [] });
+        return openLogCfg();
+      case 'lg-copy': {
+        const list = q('.pop')?._lgList || [];
+        await navigator.clipboard.writeText(list.map(x => `${new Date(x.t).toLocaleString('ja-JP')}\t${x.s}\t${x.l}\t${x.c}\t${x.m}`).join('\n'));
+        el.textContent = 'コピーしました';
+        setTimeout(() => { el.textContent = 'テキストでコピー'; }, 1500);
+        return;
+      }
+      case 'fc-addslot': case 'fc-delslot': case 'fc-type': case 'fc-relock': case 'fc-endtemp': {
         const F = await TG.focusCfg();
         if (act === 'fc-addslot') F.slots.push({ days: [0, 6], from: '10:00', to: '12:00' });
         if (act === 'fc-delslot') F.slots.splice(+el.dataset.si, 1);
         if (act === 'fc-type') F.type = el.dataset.v;
         if (act === 'fc-relock') F.unlockUntil = 0;
+        if (act === 'fc-endtemp') { F.tempUntil = 0; F.tempAllow = []; }
         await chrome.storage.local.set({ focus: F });
         return openFocusCfg();
       }
@@ -998,6 +1008,23 @@ const TGManager = (() => {
         const r = await chrome.runtime.sendMessage({ type: 'tg-notify-test', level: el.dataset.lv });
         return setProgress(r?.ok ? 'テスト通知を出しました' : 'テスト通知を出せませんでした');
       }
+      case 'px-hist': globalThis.TGPage?.histMenu?.(); return setTimeout(openCommentCfg, 400);
+      case 'px-recreset': return globalThis.TGPage?.recReset?.();
+      case 'chset-del': {
+        const { chSet = {} } = await chrome.storage.local.get('chSet');
+        el.dataset.keys.split('\n').forEach(k => delete chSet[k]);
+        await chrome.storage.local.set({ chSet, prefsAt: Date.now() });
+        return openCommentCfg();
+      }
+      case 'pxset': {
+        const { px = {} } = await chrome.storage.local.get('px');
+        const raw = el.dataset.v, v = raw === 'true' ? true : raw === 'false' ? false : +raw;
+        await chrome.storage.local.set({ px: { ...px, [el.dataset.k]: v }, prefsAt: Date.now() });
+        return openCommentCfg();
+      }
+      case 'cchapset':
+        await chrome.storage.local.set({ cchap: { on: el.dataset.v === 'on' }, prefsAt: Date.now() });
+        return openCommentCfg();
       case 'pickset':
         await chrome.storage.local.set({ pickMode: el.dataset.v });
         return openCommentCfg();
@@ -1322,7 +1349,7 @@ const TGManager = (() => {
     const F = await TG.focusCfg();
     const stt = TG.focusState(F);
     const hm = t => new Date(t).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
-    const now = !F.on ? 'オフ' : stt.active ? `🔒 集中モード中（${hm(stt.until)} まで）` : stt.unlocked ? `一時解除中（${hm(F.unlockUntil)} まで）` : '待機中（時間帯の外）';
+    const now = stt.temp ? `🎯 「${(F.tempAllow || []).map(id => st.folders.find(f => f.id === id)?.name || id).join('・')}」だけに集中中（${hm(F.tempUntil)} まで）` : !F.on ? 'オフ' : stt.active ? `🔒 集中モード中（${hm(stt.until)} まで）` : stt.unlocked ? `一時解除中（${hm(F.unlockUntil)} まで）` : '待機中（時間帯の外）';
     const slots = F.slots.map((sl, i) => `<div class="fc-slot" data-si="${i}">
       <div class="fc-days">${DAYS.map((d, k) => `<label class="${sl.days.includes(k) ? 'on' : ''}"><input type="checkbox" data-fd="${k}" ${sl.days.includes(k) ? 'checked' : ''}>${d}</label>`).join('')}</div>
       <span class="nt-win"><input type="time" data-ft="from" value="${esc(sl.from)}">〜<input type="time" data-ft="to" value="${esc(sl.to)}"></span>
@@ -1334,6 +1361,7 @@ const TGManager = (() => {
       <div class="bk-h">🎯 集中モード</div>
       <p class="bk-note">決めた曜日・時間帯は、選んだフォルダの動画を見えなくします（通知とは別）。つい関係ない動画を見てしまうのを防ぎます。</p>
       <label class="bk-check"><input type="checkbox" data-fg="on" ${F.on ? 'checked' : ''}><span><b>集中モードを使う</b><em>いまの状態：${now}</em></span></label>
+      ${stt.temp ? '<div class="bk-row"><button data-act="fc-endtemp">「だけに集中」を終える</button></div>' : ''}
       <div class="bk-sub">時間帯</div>
       <div class="fc-slots">${slots}</div>
       <div class="bk-row"><button data-act="fc-addslot">＋ 時間帯を追加</button></div>
@@ -1456,7 +1484,7 @@ const TGManager = (() => {
   const setAnchor = () => q('.setbtn');
   function settingsShell(tab, inner) {
     st.setTab = tab;
-    return `<div class="set"><div class="set-tabs">${SET_TABS.map(([k, l]) => `<button class="set-tab ${k === tab ? 'on' : ''}" data-act="settab" data-tab="${k}">${l}</button>`).join('')}</div>
+    return `<div class="set"><div class="set-tabs">${SET_TABS.map(([k, l]) => `<button class="set-tab ${k === tab ? 'on' : ''}" data-act="settab" data-tab="${k}">${l}</button>`).join('')}<button class="set-tab set-log ${tab === 'log' ? 'on' : ''}" data-act="settab" data-tab="log" title="TubeFolioがバックグラウンドで行ったことの記録">📝 動作ログ</button></div>
       <div class="set-body">${inner}</div></div>`;
   }
   const SET_OPTS = { kind: 'settings', alignRight: true, wide: true, settings: true };
@@ -1465,29 +1493,141 @@ const TGManager = (() => {
     if (tab === 'cmt') return openCommentCfg();
     if (tab === 'notify') return openNotifyCfg();
     if (tab === 'focus') return openFocusCfg();
+    if (tab === 'log') return openLogCfg();
     return openBackup();
   }
+  // ---------- 動作ログ（設定の中で見る） ----------
+  const LG = { level: 'all', cat: '', q: '', shown: 200 };
+  async function openLogCfg() {
+    const { tgLog = [] } = await chrome.storage.local.get('tgLog');
+    const all = tgLog.slice().reverse();
+    const SRC = { bg: ['🖥', 'バックグラウンド'], yt: ['▶', 'YouTubeのタブ'], page: ['📄', '拡張機能の画面'] };
+    const p2 = n => String(n).padStart(2, '0');
+    const counts = {};
+    all.forEach(x => { counts[x.c] = (counts[x.c] || 0) + 1; });
+    const qq = LG.q.toLowerCase();
+    const list = all.filter(x => (LG.level === 'all' || x.l !== 'info') && (!LG.cat || x.c === LG.cat) && (!qq || (x.m + x.c).toLowerCase().includes(qq)));
+    const errs = all.filter(x => x.l === 'error').length, warns = all.filter(x => x.l === 'warn').length;
+    let rows = '', lastDay = '';
+    for (const x of list.slice(0, LG.shown)) {
+      const d = new Date(x.t), dk = `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}（${'日月火水木金土'[d.getDay()]}）`;
+      if (dk !== lastDay) { rows += `<div class="lg-day">${dk}</div>`; lastDay = dk; }
+      const s = SRC[x.s] || ['', ''];
+      rows += `<div class="lg-row lg-${esc(x.l)}"><span class="lg-t">${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}</span><span title="${s[1]}">${s[0]}</span><span class="lg-c">${esc(x.c)}</span><span class="lg-m">${esc(x.m)}</span></div>`;
+    }
+    const keepScroll = q('.lg-list')?.scrollTop || 0;
+    showPop(setAnchor(), settingsShell('log', `<div class="bk lg">
+      <div class="bk-h">📝 動作ログ <small class="lg-sum">${all.length}件${errs ? `・エラー ${errs}` : ''}${warns ? `・注意 ${warns}` : ''}</small></div>
+      <div class="lg-tools">
+        <div class="cm-seg"><button data-act="lg-lv" data-v="all" class="${LG.level === 'all' ? 'on' : ''}">すべて</button><button data-act="lg-lv" data-v="warn" class="${LG.level !== 'all' ? 'on' : ''}">注意・エラーだけ</button></div>
+        <select class="lg-cat"><option value="">種類：すべて</option>${Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([c, n]) => `<option value="${esc(c)}" ${LG.cat === c ? 'selected' : ''}>${esc(c)}（${n}）</option>`).join('')}</select>
+        <input class="lg-q" type="search" placeholder="検索" value="${esc(LG.q)}">
+      </div>
+      <div class="lg-list">${rows || '<p class="bk-note">記録はありません。</p>'}${list.length > LG.shown ? '<button data-act="lg-more" class="lg-more">さらに表示</button>' : ''}</div>
+      <div class="bk-row"><button data-act="lg-copy">テキストでコピー</button><button data-act="open-log">別のタブで開く</button><button class="ghostlink" data-act="lg-clear">ログを消去</button></div>
+    </div>`), SET_OPTS);
+    const p = q('.pop');
+    p.querySelector('.lg-list').scrollTop = keepScroll;
+    p.querySelector('.lg-cat').addEventListener('change', e => { LG.cat = e.target.value; LG.shown = 200; openLogCfg(); });
+    let t = null;
+    p.querySelector('.lg-q').addEventListener('input', e => { clearTimeout(t); t = setTimeout(async () => { LG.q = e.target.value.trim(); await openLogCfg(); const i = q('.lg-q'); i?.focus(); i?.setSelectionRange(i.value.length, i.value.length); }, 300); });
+    ['keydown', 'keyup', 'keypress'].forEach(ev => p.addEventListener(ev, e => e.stopPropagation()));
+    p._lgList = list;
+  }
+
+  let lgT = null;
+  chrome.storage.onChanged.addListener(ch => {
+    if (!ch.tgLog || !$ || st?.setTab !== 'log' || !q('.lg-list') || $.activeElement?.classList?.contains('lg-q')) return;
+    clearTimeout(lgT); lgT = setTimeout(() => { if (st.setTab === 'log' && q('.lg-list')) openLogCfg(); }, 1500);
+  });
+
   async function openCommentCfg() {
     const DEF = { side: 'right', speed: 2, width: 'normal', sort: 'top', end: 'hide', mode: 'cmt' };
     const cfg = { ...DEF, ...((await chrome.storage.local.get('cmt')).cmt || {}) };
     const pick = (await chrome.storage.local.get('pickMode')).pickMode || 'auto';
+    const chap = (await chrome.storage.local.get('cchap')).cchap?.on !== false;
+    const xr = await chrome.storage.local.get(['px', 'folderRates', 'sleepWin', 'chSet']);
+    // チャンネル別の設定（同じチャンネルの別キーはまとめて1行）
+    const chRows = new Map();
+    for (const [k, c] of Object.entries(xr.chSet || {})) {
+      const id = c.name || k, e = chRows.get(id) || { name: c.name || k, c, keys: [] };
+      e.keys.push(k); chRows.set(id, e);
+    }
+    const chList = [...chRows.values()].map(({ name, c, keys }) => `<div class="cm-row px-chrow"><span>${esc(name)}<em class="px-em">${[c.s > 0 ? `冒頭 ${c.s}秒` : '', c.e > 0 ? `最後 ${c.e}秒` : '', c.mid ? 'サムネ：途中の画面' : ''].filter(Boolean).join('・')}</em></span>
+      <button class="icon" data-act="chset-del" data-keys="${esc(keys.join('\n'))}" title="この設定を消す">✕</button></div>`).join('');
+    const px = { seek: true, seekSec: 10, mini: true, brk: 60, bed: true, autoJa: true, adFast: true, saver: false, exact: true, tags: true, nth: true, echo: true, ...(xr.px || {}) };
+    const rates = xr.folderRates || {}, slp = { on: true, from: '23:00', to: '07:00', ...(xr.sleepWin || {}) };
+    const pxRow = (label, key, opts) => `<div class="cm-row"><span>${label}</span><div class="cm-seg">${opts.map(([v, t]) =>
+      `<button data-act="pxset" data-k="${key}" data-v="${v}" class="${String(px[key]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div></div>`;
+    const RATES = ['', '0.75', '1', '1.25', '1.5', '1.75', '2'];
+    const rateRows = TG.tree(st.folders).map(({ f, depth }) => `<div class="cm-row px-rate" style="padding-left:${depth * 16}px"><span><i class="px-dot" style="background:${esc(f.color || '#888')}"></i>${esc(f.name)}</span>
+      <select data-rate="${esc(f.id)}">${RATES.map(r => `<option value="${r}" ${String(rates[f.id] || '') === r ? 'selected' : ''}>${r ? r + ' 倍' : depth ? '親フォルダと同じ' : '指定なし'}</option>`).join('')}</select></div>`).join('');
+    const nRates = Object.keys(rates).filter(k => rates[k]).length;
     const row = (label, key, opts) => `<div class="cm-row"><span>${label}</span><div class="cm-seg">${opts.map(([v, t]) =>
       `<button data-act="cmtset" data-k="${key}" data-v="${v}" class="${String(cfg[key]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</div></div>`;
+    // 説明は左、ボタンは右
+    const sec = (title, desc, ctl) => `<div class="bk-h cm-h">${title}</div><div class="cm-sec"><p class="cm-desc">${desc}</p><div class="cm-ctl">${ctl}</div></div>`;
     showPop(setAnchor(), settingsShell('cmt', `<div class="bk">
-      <div class="bk-h">💬 再生画面のコメント・文字起こし</div>
-      <p class="bk-note">動画の横にコメントを下から上へ流します。「文字起こし」にすると、字幕の文を再生位置に合わせて流します（行を押すとその位置へ）。再生画面の操作バーの 💬 からも変えられます。設定はすべての動画で共通です。</p>
-      ${row('内容', 'mode', [['cmt', 'コメント'], ['tr', '文字起こし']])}
-      ${row('表示', 'side', [['right', '右側'], ['left', '左側'], ['off', 'オフ']])}
-      ${row('速さ', 'speed', [[1, '遅い'], [2, '普通'], [3, '速い']])}
-      ${row('幅', 'width', [['narrow', '狭い'], ['normal', '普通'], ['wide', '広い']])}
-      ${row('並び', 'sort', [['top', '評価順'], ['new', '新しい順']])}
-      ${row('最後まで流れたら', 'end', [['hide', '隠す'], ['loop', 'ループ'], ['stay', 'そのまま']])}
-      <div class="bk-h" style="margin-top:16px">⏭ 次に見る動画</div>
-      <p class="bk-note">動画が終わる30秒前に4本出します。1本目は連続再生・YouTubeの再生リストの次の動画、2本目からはTubeFolioの「後で見る」からランダム（無ければYouTubeのおすすめ）。</p>
-      <div class="cm-row"><span>出す場面</span><div class="cm-seg">${[['auto', '連続再生・再生リストのとき'], ['always', 'いつも'], ['off', '出さない']].map(([v, t]) => `<button data-act="pickset" data-v="${v}" class="${pick === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
-      <div class="bk-h" style="margin-top:16px">🔖 ブックマーク</div>
-      <p class="bk-note">再生中に <b>B</b> キーを押すと、その瞬間の時間を保存します（サイドバーの「ブックマーク」で一覧）。</p>
+      ${sec('💬 再生画面のコメント・文字起こし', '動画の横にコメントを下から上へ流します。「文字起こし」にすると、字幕の文を再生位置に合わせて流します（行を押すとその位置へ）。<br>再生画面の操作バーの 💬 からも変えられます。設定はすべての動画で共通です。',
+        row('内容', 'mode', [['cmt', 'コメント'], ['tr', '文字起こし']]) +
+        row('表示', 'side', [['right', '右側'], ['left', '左側'], ['off', 'オフ']]) +
+        row('速さ', 'speed', [[1, '遅い'], [2, '普通'], [3, '速い']]) +
+        row('幅', 'width', [['narrow', '狭い'], ['normal', '普通'], ['wide', '広い']]) +
+        row('並び', 'sort', [['top', '評価順'], ['new', '新しい順']]) +
+        row('最後まで流れたら', 'end', [['hide', '隠す'], ['loop', 'ループ'], ['stay', 'そのまま']]))}
+      <div class="bk-h cm-h">⏱ コメントのチャプター</div>
+      <p class="bk-note">再生中の動画のコメントを読み、「0:25」のような時間をシークバーの印と、操作バーの ⏱ の一覧にします。押すとその場面へ飛びます。</p>
+      <div class="cm-row"><span>使う</span><div class="cm-seg">${[['on', 'オン'], ['off', 'オフ']].map(([v, t]) => `<button data-act="cchapset" data-v="${v}" class="${(chap ? 'on' : 'off') === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      <div class="bk-h cm-h">⏭ 次に見る動画</div>
+      <p class="bk-note">TubeFolioの「後で見る」・連続再生や、YouTubeの再生リストで見ているとき、動画が終わる30秒前に4本出します（ほかの動画はふつうに再生）。1本目は連続再生・YouTubeの再生リストの次の動画、2本目からはTubeFolioの「後で見る」からランダム（無ければYouTubeのおすすめ）。</p>
+      <div class="cm-row"><span>出す場面</span><div class="cm-seg">${[['auto', '後で見る・再生リストのとき'], ['always', 'いつも'], ['off', '出さない']].map(([v, t]) => `<button data-act="pickset" data-v="${v}" class="${pick === v ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+      <div class="bk-h cm-h">⏪⏩ 戻る・進むボタン</div>
+      <p class="bk-note">動画にマウスを乗せたとき、スマホ版のように左右に「〇秒戻る・進む」ボタンを出します。</p>
+      ${pxRow('表示', 'seek', [['true', 'オン'], ['false', 'オフ']])}
+      ${pxRow('秒数', 'seekSec', [[5, '5秒'], [10, '10秒'], [15, '15秒'], [30, '30秒']])}
+      <div class="bk-h cm-h">📺 自動ミニプレイヤー</div>
+      <p class="bk-note">再生中に下へスクロールしてコメントを読むとき、プレイヤーを右下に小さく表示します（↑ で元の位置へ、⧉ で本物のピクチャー・イン・ピクチャー、✕ で閉じる）。</p>
+      ${pxRow('使う', 'mini', [['true', 'オン'], ['false', 'オフ']])}
+      <div class="bk-h cm-h">🎚 フォルダ別の再生速度</div>
+      <p class="bk-note">動画を開いたとき、そのチャンネルが入っているフォルダの速度に自動で合わせます（サブフォルダが「親フォルダと同じ」なら親の設定）。開いたあとに手で変えた速度はそのまま。</p>
+      <details class="acc px-acc" ${nRates ? 'open' : ''}><summary>フォルダごとの速度<small>${nRates ? `（${nRates} フォルダ設定済み）` : ''}</small></summary>${rateRows || '<p class="bk-note">フォルダがありません</p>'}</details>
+      <div class="bk-h cm-h">⏰ リマインダー</div>
+      <p class="bk-note">見ている動画の上にやさしくお知らせを出して、視聴を区切る目安にします。続けて見た時間は、10分以上止めると数え直します。</p>
+      ${pxRow('休憩', 'brk', [[0, 'オフ'], [30, '30分'], [60, '60分'], [90, '90分'], [120, '120分']])}
+      ${pxRow('就寝時間', 'bed', [['true', 'オン'], ['false', 'オフ']])}
+      <div class="cm-row"><span>就寝時間の範囲<em class="px-em">視聴パターンの就寝時間と共通</em></span><span class="px-time"><input type="time" data-slp="from" value="${esc(slp.from)}">〜<input type="time" data-slp="to" value="${esc(slp.to)}"></span></div>
+      <div class="bk-h cm-h">📢 広告・通信量</div>
+      <p class="bk-note">広告が流れたら16倍速・ミュートにして一瞬で終わらせ、スキップできるときは自動で押します。省データモードは画質を最低（144p）にして映像を隠し、音声中心で見ます（⚡ ボタンからも切り替え可）。</p>
+      ${pxRow('広告の早送り', 'adFast', [['true', 'オン'], ['false', 'オフ']])}
+      ${pxRow('省データモード', 'saver', [['true', 'オン'], ['false', 'オフ']])}
+      <div class="bk-h cm-h">🔢 動画の情報</div>
+      <p class="bk-note">「2年前」「1.2万回」のような丸めた表示の代わりに、タイトルの下へ正確な公開日時・再生回数を出します。概要欄の下には、投稿者が設定したタグ（検索キーワード）と、タグから見たフォルダの候補を出します。</p>
+      ${pxRow('正確な日時・再生数', 'exact', [['true', '表示'], ['false', '非表示']])}
+      ${pxRow('タグ', 'tags', [['true', '表示'], ['false', '非表示']])}
+      ${pxRow('🧭 少しズレた関連（3次リンク）', 'nth', [['true', '表示'], ['false', '非表示']])}
+      ${pxRow('🧨 エコーチェンバー破壊ボタン', 'echo', [['true', '表示'], ['false', '非表示']])}
+      ${pxRow('日本語以外の動画', 'autoJa', [['true', '自動で日本語字幕'], ['false', 'そのまま']])}
+      <div class="bk-h cm-h">🧹 履歴とおすすめ</div>
+      <p class="bk-note">履歴オフは、ホーム右下とおすすめのボタンからも使えます。おすすめのリセットは、間違って押さないようにここだけに置いています。</p>
+      <div class="cm-row"><span>${globalThis.TGPage?.histLabel?.() || '🕶 履歴オフ'}</span><button data-act="px-hist">${globalThis.TGPage?.histOn?.() ? '元に戻す' : '履歴オフにする…'}</button></div>
+      <div class="cm-row"><span>↺ おすすめをリセット</span><button data-act="px-recreset">リセットの画面を開く…</button></div>
+      <div class="bk-h cm-h">📺 チャンネル別の設定</div>
+      <p class="bk-note">再生画面の操作バーの <b>⚙（つまみ）</b> から、チャンネルごとに「冒頭〇秒をスキップ」「最後〇秒で次へ」「サムネを動画の途中の画面にする」を設定できます。</p>
+      ${chList || '<p class="bk-note">まだありません。</p>'}
+      <div class="bk-h cm-h">🔖 ブックマーク</div>
+      <p class="bk-note">再生中に <b>B</b> キーを押すと、その瞬間の時間を保存して1行メモを書けます（サイドバーの「ブックマーク」で一覧。⏱ チャプターの一覧にも出ます）。</p>
     </div>`), SET_OPTS);
+    const pp = q('.pop');
+    pp.querySelectorAll('[data-rate]').forEach(sel => sel.addEventListener('change', async () => {
+      const { folderRates = {} } = await chrome.storage.local.get('folderRates');
+      if (sel.value) folderRates[sel.dataset.rate] = +sel.value; else delete folderRates[sel.dataset.rate];
+      await chrome.storage.local.set({ folderRates, prefsAt: Date.now() });
+    }));
+    pp.querySelectorAll('[data-slp]').forEach(inp => inp.addEventListener('change', async () => {
+      const { sleepWin = {} } = await chrome.storage.local.get('sleepWin');
+      await chrome.storage.local.set({ sleepWin: { on: true, from: '23:00', to: '07:00', ...sleepWin, [inp.dataset.slp]: inp.value }, prefsAt: Date.now() });
+    }));
+    ['keydown', 'keyup', 'keypress'].forEach(t => pp.addEventListener(t, e => e.stopPropagation()));
   }
 
   async function openBackup(anchor) {
@@ -1508,11 +1648,11 @@ const TGManager = (() => {
         <div class="bk-uri"><code>${esc(s.redirect || '')}</code><button data-act="copy-redirect" data-v="${esc(s.redirect || '')}">コピー</button></div>
         <div class="bk-row"><input class="cid" placeholder="クライアントID（～.apps.googleusercontent.com）"><button class="primary" data-act="drv-saveid">保存</button></div>`;
     } else if (!s.connected) {
-      drv = `<p class="bk-note">クライアントID設定済み。接続するとGoogleのログイン画面が開きます。</p>
+      drv = `<p class="bk-note">${s.builtin ? '' : 'クライアントID設定済み。'}接続するとGoogleのログイン画面が開きます。</p>
         <div class="bk-row"><button class="primary" data-act="drv-connect">${I.cloud}<span>Google Drive に接続</span></button></div>
-        <details class="bk-adv"><summary>クライアントIDを変更</summary>
+        ${s.builtin ? '' : `<details class="bk-adv"><summary>クライアントIDを変更</summary>
           <div class="bk-uri"><code>${esc(s.redirect || '')}</code><button data-act="copy-redirect" data-v="${esc(s.redirect || '')}">コピー</button></div>
-          <div class="bk-row"><input class="cid" value="${esc(s.clientId)}"><button data-act="drv-saveid">保存</button></div></details>`;
+          <div class="bk-row"><input class="cid" value="${esc(s.clientId)}"><button data-act="drv-saveid">保存</button></div></details>`}`;
     } else {
       drv = `<p class="bk-note">接続済み・${last}${s.lastError ? `<br><span class="bk-err">${esc(s.lastError)}</span>` : ''}</p>
         ${s.needReauth ? `<div class="bk-row"><button class="primary" data-act="drv-connect">${I.cloud}<span>Google Drive に再接続</span></button></div><p class="bk-note">Googleの認証の期限が切れました。押すとGoogleの画面が開きます（同じアカウントを選んでください）。</p>` : ''}
@@ -1523,15 +1663,14 @@ const TGManager = (() => {
         ${chk('drv-later', 'incLater', `後で見る<em>このPCに ${(data.aux.later?.later || []).length} 本</em>`, size.later)}
         ${chk('drv-prefs', 'incPrefs', 'その他の設定<em>通知するフォルダ・コメント表示・振り分け補助など</em>', size.prefs)}
         <p class="bk-note">視聴記録・視聴済み・後で見るは、Driveから読み込むとき置き換えずに合体します（このPCで見た分は消えません）。</p></details>
-        <div class="bk-row"><button data-act="drv-push">${I.ul}<span>今すぐ保存</span></button><button data-act="drv-pull">${I.dl}<span>Driveから読み込み</span></button></div>
-        <div class="bk-row"><button data-act="open-log">📝 動作ログ（同期の記録）</button><button class="ghostlink" data-act="drv-disconnect">接続を解除</button></div>`;
+        <div class="bk-row"><button data-act="drv-push">${I.ul}<span>今すぐ保存</span></button><button data-act="drv-pull">${I.dl}<span>Driveから読み込み</span></button><button class="ghostlink" data-act="drv-disconnect">接続を解除</button></div>`;
     }
     showPop(anchor, settingsShell('backup', '') .replace('<div class="set-body"></div>', '<div class="set-body">' + `<div class="bk">
+      <div class="bk-h">Google Drive</div>${drv}
+      <div class="bk-h">バックアップ（置き換え前の控え）</div>${await backupList()}
       <div class="bk-h">ファイル</div>
       <div class="bk-row"><button data-act="exp">${I.dl}<span>エクスポート（ダウンロード）</span></button><button data-act="imp">${I.ul}<span>インポート</span></button></div>
-      <p class="bk-note">データ量：全部で ${kb(total)}（フォルダ・チャンネル ${kb(size.base)}／更新情報 ${kb(size.meta)}／視聴記録 ${kb(size.history)}／後で見る ${kb(size.later)}／設定 ${kb(size.prefs)}）。ファイルのエクスポートには全部入ります。</p>
-      <div class="bk-h">Google Drive</div>${drv}
-      <div class="bk-h">バックアップ（置き換え前の控え）</div>${await backupList()}</div>` + '</div>'), { ...SET_OPTS, anchor });
+      <p class="bk-note">データ量：全部で ${kb(total)}（フォルダ・チャンネル ${kb(size.base)}／更新情報 ${kb(size.meta)}／視聴記録 ${kb(size.history)}／後で見る ${kb(size.later)}／設定 ${kb(size.prefs)}）。ファイルのエクスポートには全部入ります。</p></div>` + '</div>'), { ...SET_OPTS, anchor });
     if (st.pop?.kind !== 'settings') return;
     const p = q('.pop');
     p.querySelector('.acc')?.addEventListener('toggle', e => { st.accOpen = e.target.open; });
@@ -1880,9 +2019,36 @@ const TGManager = (() => {
   .nt-help{margin:0 0 8px;padding-left:18px;font-size:12px;line-height:1.7;color:var(--muted)}
   .nt-help b{color:var(--fg)}
   .pop.settings{width:min(600px,calc(100vw - 24px));max-width:none;padding:0;max-height:min(84vh,860px);overflow-y:auto}
-  .set-tabs{position:sticky;top:0;z-index:2;display:flex;gap:2px;padding:10px 10px 0;background:var(--card);border-bottom:1px solid var(--line)}
-  .set-tab{white-space:nowrap;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;background:transparent;padding:8px 11px;font-size:13px;color:var(--muted);margin-bottom:-1px}
+  .set-tabs{position:sticky;top:0;z-index:2;display:flex;gap:0;padding:10px 6px 0;overflow-x:auto;scrollbar-width:none;background:var(--card);border-bottom:1px solid var(--line)}
+  .set-tab{white-space:nowrap;border:1px solid transparent;border-bottom:none;border-radius:10px 10px 0 0;background:transparent;padding:8px 6px;font-size:13px;color:var(--muted);margin-bottom:-1px}
   .set-tab:hover{background:var(--card2)}
+  .set-tab.set-log{margin-left:auto}
+  .cm-h{margin-top:18px}.cm-h:first-child{margin-top:0}
+  .px-rate{margin:6px 2px}.px-rate span{display:flex;align-items:center;gap:6px}
+  .px-dot{display:inline-block;width:10px;height:10px;border-radius:3px}
+  .px-rate select,.px-time input{height:28px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);padding:0 6px;font-size:12px}
+  .px-time{display:flex;align-items:center;gap:4px}
+  .px-em{display:block;font-style:normal;font-size:11px;color:var(--muted)}
+  .px-acc summary small{color:var(--muted);font-weight:400}
+  .cm-sec{display:grid;grid-template-columns:minmax(120px,36%) 1fr;gap:6px 16px;align-items:start;padding-bottom:6px}
+  .cm-desc{margin:4px 0 0;font-size:12px;line-height:1.65;color:var(--muted)}
+  .cm-ctl{display:flex;flex-direction:column;gap:8px;min-width:0}
+  .cm-ctl .cm-row{margin:0}
+  .cm-ctl .cm-row.cm-col{flex-direction:column;align-items:flex-end;gap:6px}
+  .cm-ctl .cm-row.cm-col>span{align-self:flex-start}
+  .cm-info{font-size:12px;color:var(--muted);text-align:right;padding-top:4px}
+  .lg .bk-h small{font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}
+  .lg-tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
+  .lg-tools select,.lg-tools input{height:30px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);padding:0 8px;font-size:12px}
+  .lg-tools input{flex:1;min-width:120px}
+  .lg-list{max-height:min(52vh,460px);overflow-y:auto;border:1px solid var(--line);border-radius:10px;padding:4px 8px;margin-bottom:10px;font-size:12px}
+  .lg-day{position:sticky;top:-4px;background:var(--card);padding:6px 0 4px;font-weight:700;color:var(--muted);font-size:11px}
+  .lg-row{display:grid;grid-template-columns:58px 18px 78px 1fr;gap:6px;padding:3px 0;border-bottom:1px solid var(--line);align-items:baseline}
+  .lg-t{color:var(--muted);font-variant-numeric:tabular-nums}
+  .lg-c{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lg-m{word-break:break-all;white-space:pre-wrap}
+  .lg-warn .lg-m{color:#e8a200}.lg-error .lg-m{color:#ff6b6b}
+  .lg-more{margin:6px auto;display:block}
   .set-tab.on{background:var(--bg);color:var(--fg);font-weight:700;border-color:var(--line);border-bottom:1px solid var(--bg)}
   .set-body{padding:14px 16px 16px;background:var(--bg)}
   .acc{border:1px solid var(--line);border-radius:10px;padding:2px 12px;margin:10px 0}

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TubeFolio",
-  "version": "4.22.0",
+  "version": "4.34.0",
   "description": "YouTubeの登録チャンネルをフォルダで整理。フォルダ別の新着・動画・ライブ・ショート一覧、通知、集中モード、視聴記録。",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArZ9eZ9HEFkTJX1DwJ9zyfyjRsUM0B6ae/Ptg+Pcr10wUvyMPfy6CsRxWTPUViflqOAT8HxRoRwFomBZPpOiNYDG2pJgML71sEVr9wcHXcHzi42MBenNf4+41f3MqsCd6DOg0rjUYR7qqNEhzxTnOtTRZpZaAt1VRboHtKFKnwtCuN8vhWmqrRdX0+wA08IqQW9iPA+2HdFrnEsQEqy5z4s0aU24mdFXNTtFJoY3JKc1G7tDtOOmqdLmWWwif2EzIKLZVLewY4gdEaOKbhNGDwFxuMMei4RUiJasmvvSTnyYRGZ6DIvqAA1/NwkVI4phQMn8/3caNTMQd2lbLAasC3wIDAQAB",
   "permissions": [
@@ -9,13 +9,15 @@
     "unlimitedStorage",
     "identity",
     "alarms",
-    "notifications"
+    "notifications",
+    "declarativeNetRequest"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://www.googleapis.com/*",
     "https://oauth2.googleapis.com/*",
-    "https://returnyoutubedislikeapi.com/*"
+    "https://returnyoutubedislikeapi.com/*",
+    "https://translate.googleapis.com/*"
   ],
   "action": {
     "default_title": "TubeFolio",
@@ -39,13 +41,25 @@
         "https://www.youtube.com/*"
       ],
       "js": [
+        "mainworld.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
         "shared.js",
         "yt-api.js",
         "extras.js",
         "feed.js",
         "manager.js",
         "comments.js",
-        "content.js"
+        "chapters.js",
+        "content.js",
+        "playerx.js"
       ],
       "css": [
         "content.css"

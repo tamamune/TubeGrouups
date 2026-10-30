@@ -635,7 +635,7 @@ const YTAPI = (() => {
   async function videoOwner(videoId) {
     const j = await call('player', { videoId });
     const d = j?.videoDetails;
-    return d?.channelId ? { k: 'channel/' + d.channelId, n: d.author || '', t: d.title || '' } : null;
+    return d?.channelId ? { k: 'channel/' + d.channelId, n: d.author || '', t: d.title || '', d: +d.lengthSeconds || 0, kw: d.keywords || [] } : null;
   }
 
   // YouTube本体の「後で見る」再生リスト（最大 maxPages×100本）
@@ -733,11 +733,12 @@ const YTAPI = (() => {
   }
 
   // YouTube検索（1ページ分）。token を渡すと続き
-  async function search(query, token, signal) {
+  // params … 検索の絞り込み（例：'EgQIARAB' ＝ 1時間以内・動画）
+  async function search(query, token, signal, params) {
     const cfg = await getCfg();
     const context = structuredClone(cfg.INNERTUBE_CONTEXT || {});
     context.client = { ...(context.client || {}), hl: 'en' };
-    const json = await innertube('search', token ? { context, continuation: token } : { context, query }, cfg, signal);
+    const json = await innertube('search', token ? { context, continuation: token } : { context, query, ...(params ? { params } : {}) }, cfg, signal);
     return { items: parseTab(json), token: lastToken(json) };
   }
 

@@ -57,7 +57,7 @@ const TGComments = (() => {
 
   // 💬ボタンは動画下の操作バー（字幕・設定ボタンの並び）に入れる。見つからなければ右上に置く
   function ensureButton(p) {
-    const bar = p.querySelector('.ytp-right-controls');
+    const bar = p.querySelector('.ytp-right-controls-left') || p.querySelector('.ytp-right-controls');
     if (btn && p.contains(btn) && (!bar || bar.contains(btn))) return;
     btn?.remove();
     btn = document.createElement('button');
@@ -128,7 +128,6 @@ const TGComments = (() => {
     ctl?.abort();
     ctl = new AbortController();
     token = null; ended = false; loading = true; endAt = 0; segs = null; segIdx = -1; stamps = [];
-    panel?.querySelector('.tg-toc-btn')?.remove(); panel?.querySelector('.tg-toc')?.remove(); panel?.classList.remove('tg-toc-open');
     panel?.classList.remove('tg-c-done');
     panel?.classList.toggle('tg-c-tr', cfg.mode === 'tr');
     if (cfg.mode === 'tr') return loadTr(v);
@@ -158,7 +157,7 @@ const TGComments = (() => {
     }
   }
 
-  // コメントの「12:34」「1:02:03」を押せるようにする（その時間へ移動）。集めて目次にもする
+  // コメントの「12:34」「1:02:03」を押せるようにする（その時間へ移動）。目次は chapters.js
   const TS = /(^|[^\d:])((?:(\d{1,2}):)?(\d{1,2}):([0-5]\d))(?![\d:])/g;
   let stamps = [];
   function linkTimes(text, author) {
@@ -175,26 +174,6 @@ const TGComments = (() => {
     list.insertAdjacentHTML('beforeend', items.map(c => `<div class="tg-c-item">
       <div class="tg-c-meta"><span class="tg-c-author">${esc(c.author)}</span>${c.likes && c.likes !== '0' ? `<span class="tg-c-like">♥ ${esc(c.likes)}</span>` : ''}${c.time ? `<span class="tg-c-time">${esc(c.time)}</span>` : ''}</div>
       <div class="tg-c-text">${linkTimes(c.text, c.author)}</div></div>`).join(''));
-    renderToc();
-  }
-  // 目次（コメントに書かれた時間の一覧）
-  function renderToc() {
-    if (!panel) return;
-    let btn2 = panel.querySelector('.tg-toc-btn');
-    if (!stamps.length) { btn2?.remove(); panel.querySelector('.tg-toc')?.remove(); return; }
-    if (!btn2) {
-      btn2 = document.createElement('button');
-      btn2.className = 'tg-toc-btn';
-      btn2.addEventListener('click', () => panel.classList.toggle('tg-toc-open'));
-      panel.appendChild(btn2);
-    }
-    const uniq = new Map();
-    stamps.slice().sort((a, b) => a.sec - b.sec).forEach(x => { const k = x.sec; if (!uniq.has(k) || (!uniq.get(k).text && x.text)) uniq.set(k, x); });
-    btn2.textContent = `⏱ 目次 ${uniq.size}`;
-    let toc = panel.querySelector('.tg-toc');
-    if (!toc) { toc = document.createElement('div'); toc.className = 'tg-toc'; panel.appendChild(toc); }
-    toc.innerHTML = '<div class="tg-toc-h">コメントの時間（押すとその場面へ）</div>' + [...uniq.values()].map(x =>
-      `<button class="tg-ts tg-toc-row" data-sec="${x.sec}"><b>${esc(x.label)}</b><span>${esc(x.text || '（' + x.author + '）')}</span></button>`).join('');
   }
   // 時間を押したら、その場面へ
   document.addEventListener('click', e => {
@@ -203,7 +182,6 @@ const TGComments = (() => {
     e.preventDefault(); e.stopPropagation();
     const v = video();
     if (v) { v.currentTime = +b.dataset.sec; v.play?.(); }
-    panel.classList.remove('tg-toc-open');
   }, true);
 
   // 全部読み込んだら、最後のコメントが上へ流れきるよう下にも余白を入れる

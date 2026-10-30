@@ -11,6 +11,9 @@ const TGFeed = (() => {
     later: { label: '後で見る', short: '後で見る', pl: '' },
     bm: { label: 'ブックマーク', short: 'ブックマーク', pl: '', sideOnly: true }
   };
+  let chSet = {}; // チャンネル別の設定（サムネの差し替えなど）
+  chrome.storage.local.get('chSet').then(r => { chSet = r.chSet || {}; });
+  chrome.storage.onChanged.addListener(ch => { if (ch.chSet) chSet = ch.chSet.newValue || {}; });
   let laterSet = new Set();
   chrome.storage.local.get('later').then(({ later = [] }) => { laterSet = new Set(later.map(x => x.v)); });
   let folderMap = new Map();
@@ -166,7 +169,7 @@ const TGFeed = (() => {
     if (S.feedType === 'later') return 'later:' + Date.now(); // 毎回作り直す（カテゴリの切り替えも含む）
     if (S.feedType === 'bm') return 'bm:' + Date.now();
     if (S.feedType === 'new') return JSON.stringify(['new', FX.active, S.newOff, S.folders.map(f => [f.id, f.keys.length, f.parent]), Object.values(S.channels).filter(c => c.hidden).length]);
-    if (S.feedType === 'rec') return JSON.stringify(['rec', S.recMode, S.recKind, S.recMode === 'search' ? TG.searchQuery(S.folders, S.sFolder, S.sText) : '', favSetOf(S).size, S.folders.map(f => [f.name, f.color, f.keys.length])]);
+    if (S.feedType === 'rec') return JSON.stringify(['rec', S.recMode, S.recKind, S.zeroView, S.recMode === 'search' ? TG.searchQuery(S.folders, S.sFolder, S.sText) : '', favSetOf(S).size, S.folders.map(f => [f.name, f.color, f.keys.length])]);
     return JSON.stringify([S.activeGroup, S.feedType, targets(S).map(c => c.key), S.folders.map(f => [f.name, f.color])]);
   }
 
@@ -183,6 +186,7 @@ const TGFeed = (() => {
 
   // ---------- 描画 ----------
   function mount(container) {
+    if (!container) return;
     el = container;
     if (el.dataset.ready) return;
     el.dataset.ready = '1';
@@ -214,6 +218,36 @@ const TGFeed = (() => {
           return TGX.startQueue(list.slice(i).filter(x => !x.short), title.slice(0, 40), { pick: true });
         }
       }
+      const bme = e.target.closest('.tg-bmedit');
+      if (bme) {
+        e.preventDefault(); e.stopPropagation();
+        const box = bme.closest('[data-bmnote]'), id = box.dataset.bmnote;
+        const cur = items.find(x => x.bm === id)?.note || '';
+        box.innerHTML = `<input class="tg-bmnin" maxlength="120" value="${esc(cur)}" placeholder="1行メモ（Enterで保存・Escでやめる）">`;
+        const inp = box.querySelector('input');
+        inp.focus(); inp.select();
+        let done = false;
+        const fin = async save => {
+          if (done) return; done = true;
+          const note = save ? inp.value.trim() : cur;
+          if (save) {
+            const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
+            const b = bookmarks.find(x => x.id === id);
+            if (b) { b.note = note; b.noteAt = Date.now(); await chrome.storage.local.set({ bookmarks }); }
+            const it = items.find(x => x.bm === id); if (it) it.note = note;
+          }
+          box.innerHTML = note ? `<span>📝 ${esc(note)}</span><button class="tg-bmedit" title="メモを直す">✎</button>` : '<button class="tg-bmedit tg-bmadd">＋ メモを追加</button>';
+        };
+        ['keydown', 'keyup', 'keypress'].forEach(t => inp.addEventListener(t, ev => {
+          ev.stopPropagation();
+          if (t === 'keydown' && !ev.isComposing && ev.key === 'Enter') fin(true);
+          if (t === 'keydown' && ev.key === 'Escape') fin(false);
+        }));
+        inp.addEventListener('blur', () => fin(true));
+        return;
+      }
+      const bmm = e.target.closest('.tg-bmmore');
+      if (bmm) { e.preventDefault(); const d = bmm.previousElementSibling; d.classList.toggle('open'); bmm.textContent = d.classList.contains('open') ? '一部だけ表示' : 'もっと見る'; return; }
       const bmrm = e.target.closest('[data-bmrm]');
       if (bmrm) {
         e.preventDefault(); e.stopPropagation();
@@ -221,7 +255,8 @@ const TGFeed = (() => {
         bmRemoved[bmrm.dataset.bmrm] = Date.now();
         await chrome.storage.local.set({ bookmarks: bookmarks.filter(x => x.id !== bmrm.dataset.bmrm), bmRemoved });
         items = items.filter(x => x.bm !== bmrm.dataset.bmrm);
-        bmrm.closest('.tg-card')?.remove();
+        chrome.storage.local.remove('bmt:' + bmrm.dataset.bmrm);
+        bmrm.closest('.tg-card, .tg-bmrow')?.remove();
         return status(`ブックマーク ${items.length} 件`);
       }
       const rm = e.target.closest('[data-wlrm]');
@@ -255,12 +290,14 @@ const TGFeed = (() => {
     const shortUrl = short || (curType === 'later' && it.short);
     const url = shortUrl ? `/shorts/${it.v}` : `/watch?v=${it.v}${it.list ? '&list=' + encodeURIComponent(it.list) : ''}${it.sec != null ? '&t=' + Math.floor(it.sec) + 's' : ''}`;
     const hq = `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/hqdefault.jpg`;
-    const src = /^https:\/\/i\d?\.ytimg\.com\//.test(it.th || '') ? it.th : short ? `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/oardefault.jpg` : hq;
+    const mid = !short && (chSet[it.ch?.key] || (it.ch?.id && chSet['channel/' + it.ch.id]))?.mid; // サムネを動画の途中の画面に
+    const src = mid ? `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/mq2.jpg` : /^https:\/\/i\d?\.ytimg\.com\//.test(it.th || '') ? it.th : short ? `https://i.ytimg.com/vi/${encodeURIComponent(it.v)}/oardefault.jpg` : hq;
     const now = Date.now();
     let badge = '';
     if (it.live) badge = '<span class="tg-badge tg-live">● ライブ配信中</span>';
     else if (it.up && it.up > now) badge = `<span class="tg-badge tg-up">配信予定 ${new Date(it.up).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>`;
     else if (it.p && now - it.p < 2 * 864e5) badge = '<span class="tg-badge">新着</span>';
+    if (it.chaos != null) badge += `<span class="tg-badge tg-chaos">👎 ${it.chaos}%</span>`;
     const when = it.bm ? `${TG.rel(it.savedAt)}に保存` : it.live ? '配信中' : it.up && it.up > now ? '配信予定' : it.p ? TG.rel(it.p) : '';
     const tags = (folderMap.get(it.ch.key) || []).map(f => `<span class="tg-ftag" style="--c:${esc(f.color)}">${esc(f.name)}</span>`).join('');
     const chLine = `<div class="tg-sub tg-chline"><span class="tg-chname">${esc(it.ch.name)}</span>${tags}${!short && when ? `<span class="tg-when"> • ${when}</span>` : ''}</div>`;
@@ -282,7 +319,35 @@ const TGFeed = (() => {
   let query = '';
   const norm = t => String(t || '').normalize('NFKC').toLowerCase();
   const matchQ = it => { if (!query) return true; const s = norm(it.t + ' ' + (it.ch?.name || '')); return query.split(/\s+/).every(w => s.includes(w)); };
-  const visible = () => (query ? items.filter(matchQ) : items);
+  // おすすめ：再生数の上限（埋もれた動画だけ）。0＝なし。再生数の分からない動画は残す
+  let viewCap = 0;
+  chrome.storage.local.get('viewCap').then(r => { viewCap = +r.viewCap || 0; });
+  const capOk = it => !(curType === 'rec' && viewCap && it.n >= viewCap);
+  const visible = () => (query || (curType === 'rec' && viewCap) ? items.filter(it => matchQ(it) && capOk(it)) : items);
+  // 🔥 賛否両論順：Return YouTube Dislike の推定値で、低評価の割合が高い順に並べ替える
+  const rydMem = new Map();
+  async function chaosSort() {
+    if (!el || curType !== 'rec') return;
+    const list = visible().slice(0, 60);
+    status(`賛否を調べています… 0 / ${list.length}`);
+    let done = 0;
+    const q = list.filter(x => !rydMem.has(x.v));
+    await Promise.all(Array.from({ length: 6 }, async () => {
+      while (q.length) {
+        const x = q.shift();
+        try { const r = await chrome.runtime.sendMessage({ type: 'ryd', v: x.v }); rydMem.set(x.v, r || null); } catch { rydMem.set(x.v, null); }
+        status(`賛否を調べています… ${++done} / ${list.length}`);
+      }
+    }));
+    const ratio = x => { const r = rydMem.get(x.v); return r && r.likes + r.dislikes >= 5 ? r.dislikes / (r.likes + r.dislikes) : -1; };
+    const sorted = [...list].sort((a, b) => ratio(b) - ratio(a));
+    sorted.forEach(x => { const r = rydMem.get(x.v); x.chaos = r && r.likes + r.dislikes >= 5 ? Math.round(ratio(x) * 100) : null; });
+    items = sorted.concat(items.filter(x => !list.includes(x)));
+    const g = el.querySelector('.tg-grid');
+    g.innerHTML = ''; shown = 0; more(true);
+    status(`🔥 賛否両論順（低評価の割合が高い順・Return YouTube Dislike の推定）：${sorted.filter(x => x.chaos != null).length} 本`);
+  }
+  function setViewCap(n) { viewCap = +n || 0; if (curType === 'rec') setQuery(query); }
   function setQuery(q) {
     query = norm(q).trim();
     if (!el) return;
@@ -298,10 +363,10 @@ const TGFeed = (() => {
     qStatus();
   }
   function qStatus() {
-    if (!query || !el) return;
+    if ((!query && !(curType === 'rec' && viewCap)) || !el) return;
     const n = visible().length;
     const rest = BATCHED(curType) && batch.loaded < batch.chs.length ? '（下へスクロールすると残りのチャンネルからも探します）' : curType === 'rec' && recHasMore() ? '（下へスクロールで続きからも探します）' : '';
-    status(`「${query}」で絞り込み：${n} 件${rest}`);
+    status(`${query ? `「${query}」で絞り込み` : `再生数 ${viewCap.toLocaleString('ja-JP')} 回未満`}：${n} 件${rest}`);
     if (!n && !rest) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">見つかりませんでした。</div>';
   }
 
@@ -521,7 +586,7 @@ const TGFeed = (() => {
       let hid = allTop.length - top.length;
       const secs = [];
       const sortSel = `<select class="tg-wlsort" title="YouTubeの一覧の並び順">${[['yt', 'YouTubeの並び'], ['new', '投稿が新しい順'], ['old', '投稿が古い順']].map(([k, l]) => `<option value="${k}" ${k === wlSort ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
-      secs.push({ id: 'tg', icon: '🕒', title: 'TubeFolioの後で見る', note: `${top.length} 本・追加した順`, items: top,
+      secs.push({ id: 'tg', icon: '🕒', title: 'TubeFolioの後で見る', note: `${top.length} 本・${laterTotal(top)}・追加した順`, items: top, tool: true,
         empty: 'まだありません。サムネイルの左下の 🕒 で追加できます。' });
       for (const p of pls.list || []) {
         const e = plItems.get(p.id);
@@ -547,7 +612,7 @@ const TGFeed = (() => {
           : x.loading || !x.items ? '<div class="tg-empty tg-empty-s">読み込み中…</div>'
           : x.items.length ? `<div class="tg-grid-in">${x.items.map(it => card(it)).join('')}</div>` : `<div class="tg-empty tg-empty-s">${x.empty}</div>`;
         return `<div class="tg-sec ${open ? 'open' : ''}" data-sec="${esc(x.id)}"><div class="tg-sec-h" data-sectoggle="${esc(x.id)}" title="押すと${open ? '閉じる' : '開く'}">
-          <b class="tg-sec-caret">▸</b>${x.icon} ${esc(x.title)}<small>${esc(x.note)}</small>${x.id !== 'tg' && open && x.items?.length ? sortSel : ''}</div>${body}</div>`;
+          <b class="tg-sec-caret">▸</b>${x.icon} ${esc(x.title)}<small>${esc(x.note)}</small>${x.id !== 'tg' && open && x.items?.length ? sortSel : ''}${open && x.items?.length ? freeTool(x.id) : ''}</div>${body}</div>`;
       }).join('');
       g.querySelectorAll('.tg-wlsort').forEach(sel => {
         sel.addEventListener('click', e => e.stopPropagation());
@@ -562,8 +627,11 @@ const TGFeed = (() => {
       }));
       if (query) setQuery(query);
       fillIfHidden();
+      bindFree(g);
     };
     draw();
+    laterView = { list: allTop, draw };
+    fillDur(allTop);
     const jobs = [];
     if (force || !wl.items || Date.now() - wl.at > 5 * 60e3) jobs.push((async () => {
       try {
@@ -589,9 +657,144 @@ const TGFeed = (() => {
   async function paintBm(S) {
     const { bookmarks = [] } = await chrome.storage.local.get('bookmarks');
     const fav = favSetOf(S);
-    const list = bookmarks.map(b => ({ v: b.v, t: b.t, p: 0, d: b.d || 0, sec: b.sec, bm: b.id, note: b.note || '', savedAt: b.at, ch: { key: b.k || b.ch?.key || '', name: (typeof b.ch === 'object' ? b.ch?.name : b.ch) || '', unsub: !((b.k || b.ch?.key) && fav.has(b.k || b.ch?.key)) } }));
-    paint(list, list.length ? `ブックマーク ${list.length} 件（新しい順）・押すとその時間から再生` : '');
-    if (!list.length) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">ブックマークはまだありません。<br>動画を再生中に <b>B</b> キーを押すと、その時間を保存できます。</div>';
+    const list = bookmarks.map(b => ({ v: b.v, t: b.t, p: 0, d: b.d || 0, sec: b.sec, bm: b.id, note: b.note || '', desc: b.desc || '', savedAt: b.at, ch: { key: b.k || b.ch?.key || '', name: (typeof b.ch === 'object' ? b.ch?.name : b.ch) || '', unsub: !((b.k || b.ch?.key) && fav.has(b.k || b.ch?.key)) } }));
+    items = list; shown = list.length;
+    el.classList.remove('tg-loading');
+    const g = el.querySelector('.tg-grid');
+    g.classList.remove('tg-split');
+    status(list.length ? `ブックマーク ${list.length} 件（新しい順）・サムネか時間を押すと、その時間から再生` : '');
+    if (!list.length) { g.innerHTML = '<div class="tg-empty">ブックマークはまだありません。<br>動画を再生中に <b>B</b> キーを押すと、その時間を保存できます。</div>'; return; }
+    const shots = await chrome.storage.local.get(list.map(x => 'bmt:' + x.bm));
+    const when = t => { const d = new Date(t); return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+    g.innerHTML = `<div class="tg-bml">${list.map(it => {
+      const url = `/watch?v=${esc(it.v)}&t=${Math.floor(it.sec)}s`;
+      const shot = shots['bmt:' + it.bm];
+      const pct = it.d ? Math.min(100, Math.round((it.sec / it.d) * 100)) : 0;
+      const tags = (folderMap.get(it.ch.key) || []).map(f => `<span class="tg-ftag" style="--c:${esc(f.color)}">${esc(f.name)}</span>`).join('');
+      return `<div class="tg-bmrow" data-v="${esc(it.v)}">
+        <a class="tg-bmth" href="${url}" title="${fmtDur(it.sec)} から再生"><img src="${shot ? shot : `https://i.ytimg.com/vi/${esc(it.v)}/mqdefault.jpg`}" alt="" loading="lazy">
+          <span class="tg-bmtime">🔖 ${fmtDur(it.sec)}</span>${it.d ? `<span class="tg-dur">${fmtDur(it.d)}</span>` : ''}
+          ${it.d ? `<span class="tg-bmbar"><i style="width:${pct}%"></i></span>` : ''}</a>
+        <div class="tg-bminfo">
+          <div class="tg-bmt"><a href="${url}">${esc(it.t)}</a><button class="tg-bmx" data-bmrm="${esc(it.bm)}" title="ブックマークを消す">✕</button></div>
+          <div class="tg-bmnote" data-bmnote="${esc(it.bm)}">${it.note ? `<span>📝 ${esc(it.note)}</span><button class="tg-bmedit" title="メモを直す">✎</button>` : '<button class="tg-bmedit tg-bmadd">＋ メモを追加</button>'}</div>
+          <div class="tg-bmch">${esc(it.ch.name)}${tags}</div>
+          <div class="tg-bmstop"><a class="tg-bmgo" href="${url}">▶ ${fmtDur(it.sec)} から再生</a><span>止めた位置 ${fmtDur(it.sec)}${it.d ? ` / ${fmtDur(it.d)}（${pct}%）` : ''}</span><span>・${when(it.savedAt)} に保存</span></div>
+          <div class="tg-bmdesc" data-bmdesc="${esc(it.bm)}">${it.desc ? (it.desc.trim() ? esc(it.desc) : '（概要欄はありません）') : '<span class="tg-bmload">概要欄を読み込み中…</span>'}</div>
+          ${it.desc && it.desc.length > 160 ? '<button class="tg-bmmore">もっと見る</button>' : ''}
+        </div></div>`;
+    }).join('')}</div>`;
+    // 概要欄が無いもの（古いブックマーク）は取得して保存
+    const need = [...new Set(list.filter(x => !x.desc).map(x => x.v))].slice(0, 20);
+    for (const v of need) {
+      let desc = '';
+      try { desc = (await YTAPI.videoText(v)).desc || ''; } catch { /* 取れなければ空 */ }
+      if (curType !== 'bm') return;
+      const { bookmarks: bs = [] } = await chrome.storage.local.get('bookmarks');
+      bs.filter(x => x.v === v && !x.desc).forEach(x => { x.desc = desc.slice(0, 1500) || ' '; });
+      await chrome.storage.local.set({ bookmarks: bs });
+      el.querySelectorAll(`.tg-bmrow[data-v="${CSS.escape(v)}"] .tg-bmdesc`).forEach(d => {
+        d.textContent = desc.trim() || '（概要欄はありません）';
+        if (desc.length > 160 && !d.nextElementSibling?.classList.contains('tg-bmmore')) d.insertAdjacentHTML('afterend', '<button class="tg-bmmore">もっと見る</button>');
+      });
+    }
+  }
+
+
+  // ---------- 後で見る：合計時間・空き時間にぴったりの組み合わせで連続再生 ----------
+  const hmText = sec => { sec = Math.round(sec); const h = Math.floor(sec / 3600), m = Math.round(sec % 3600 / 60); return h ? `${h}時間${m ? m + '分' : ''}` : `${m}分`; };
+  const durOf = it => it.d || 0;
+  function laterTotal(list) {
+    const vids = list.filter(x => !x.short);
+    const known = vids.filter(durOf), unk = vids.length - known.length;
+    const rest = vids.reduce((a, x) => a + durOf(x) * (1 - Math.min(100, watchedOf(x)) / 100), 0);
+    return known.length ? `合計 ${hmText(known.reduce((a, x) => a + durOf(x), 0))}（残り ${hmText(rest)}）${unk ? `・長さ不明 ${unk}本` : ''}` : unk ? '長さを確認中…' : '合計 0分';
+  }
+  // 長さの分からない動画を調べて保存（最大40本ずつ）
+  let durBusy = false, laterView = null;
+  async function fillDur(list) {
+    if (durBusy) return;
+    const need = list.filter(x => !x.short && !x.d).slice(0, 40);
+    if (!need.length) return;
+    durBusy = true;
+    const got = {};
+    try {
+      const q = [...need];
+      await Promise.all(Array.from({ length: 4 }, async () => {
+        while (q.length) { const x = q.shift(); try { const o = await YTAPI.videoOwner(x.v); if (o?.d) got[x.v] = o.d; } catch { /* 取れなければそのまま */ } }
+      }));
+      if (!Object.keys(got).length) return;
+      const { later = [] } = await chrome.storage.local.get('later');
+      later.forEach(x => { if (got[x.v] && !x.d) x.d = got[x.v]; });
+      await chrome.storage.local.set({ later });
+      list.forEach(x => { if (got[x.v]) x.d = got[x.v]; });
+      // 表示中の後で見る（作り直されていても最新のもの）に反映
+      if (curType === 'later' && laterView) { laterView.list.forEach(x => { if (got[x.v] && !x.d) x.d = got[x.v]; }); laterView.draw(); }
+    } finally { durBusy = false; }
+  }
+  let freeMin = 45;
+  chrome.storage.local.get('freeMin').then(r => { if (r.freeMin) freeMin = r.freeMin; });
+  function freeTool(id) {
+    return `<span class="tg-free" data-free="${esc(id)}"><span>⏱ 空き時間</span>
+      <select class="tg-free-pre" title="時間を選ぶ">${[20, 40, 60, 90, 120].map(m => `<option value="${m}" ${m === freeMin ? 'selected' : ''}>${m}分</option>`).join('')}${[20, 40, 60, 90, 120].includes(freeMin) ? '' : `<option value="${freeMin}" selected>${freeMin}分</option>`}</select>
+      <input type="number" class="tg-free-min" min="5" max="600" step="5" value="${freeMin}" title="分を入力">分
+      <button class="tg-free-go" title="この時間にぴったり収まる組み合わせを選んで連続再生">▶ ぴったり再生</button>
+      <button class="tg-free-bed" title="就寝時間（⚙ → 再生画面 → リマインダー）までに収まる組み合わせを連続再生">🌙 就寝時間まで</button>
+      <span class="tg-free-msg"></span></span>`;
+  }
+  // 入れた時間（分）に収まり、いちばん長く見られる組み合わせ（未視聴を優先・同じ長さなら追加が古い順）
+  function pickFit(list, limitSec) {
+    const cand = list.filter(x => !x.short && durOf(x) > 0 && durOf(x) <= limitSec && watchedOf(x) < WATCHED);
+    const U = 10; // 10秒単位で計算
+    const W = Math.floor(limitSec / U);
+    const best = new Array(W + 1).fill(-1); best[0] = 0;
+    const from = new Array(W + 1).fill(null);
+    cand.forEach((x, i) => {
+      const w = Math.ceil(durOf(x) / U);
+      for (let c = W; c >= w; c--) if (best[c - w] >= 0 && best[c - w] + w > best[c]) { best[c] = best[c - w] + w; from[c] = { i, prev: c - w, chain: from[c - w] }; }
+    });
+    let c = W; while (c > 0 && best[c] < 0) c--;
+    const out = []; let f = from[c];
+    while (f) { out.push(cand[f.i]); f = f.chain; }
+    return out.sort((a, b) => cand.indexOf(a) - cand.indexOf(b)); // 後で見るの並び順で
+  }
+  // 就寝時間（リマインダーの設定）の始まりまで、あと何分か（すでに就寝時間なら 0）
+  async function minToBed() {
+    const { sleepWin = {} } = await chrome.storage.local.get('sleepWin');
+    const S2 = { from: '23:00', to: '07:00', ...sleepWin };
+    const hm = t => { const [h, m] = String(t).split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+    const d = new Date(), x = d.getHours() * 60 + d.getMinutes(), a = hm(S2.from), b = hm(S2.to);
+    const inWin = a <= b ? x >= a && x < b : x >= a || x < b;
+    return { min: inWin ? 0 : (a - x + 1440) % 1440, from: S2.from };
+  }
+  function playFit(box, min, label) {
+    const id = box.dataset.free;
+    const list = laterSecItems(id);
+    const msg = box.querySelector('.tg-free-msg');
+    const pick = pickFit(list, min * 60);
+    if (!pick.length) { msg.textContent = '収まる動画がありません（長さが分かる未視聴の動画が対象）'; return; }
+    const tot = pick.reduce((a, x) => a + durOf(x), 0);
+    const name = id === 'tg' ? '後で見る' : id === 'WL' ? 'YouTubeの後で見る' : (pls.list || []).find(p => p.id === id)?.title || '再生リスト';
+    TG.log('後で見る', `${label}：${name}から ${pick.length}本（${hmText(tot)}）を連続再生`);
+    TGX.startQueue(pick, `${label}（${pick.length}本・${hmText(tot)}）`, { pick: true });
+  }
+  function bindFree(g) {
+    g.querySelectorAll('.tg-free').forEach(box => {
+      const inp = box.querySelector('.tg-free-min'), pre = box.querySelector('.tg-free-pre');
+      ['click', 'mousedown'].forEach(t => box.addEventListener(t, e => e.stopPropagation())); // 見出しの開閉にしない
+      ['keydown', 'keyup', 'keypress'].forEach(t => inp.addEventListener(t, e => { e.stopPropagation(); if (t === 'keydown' && e.key === 'Enter') box.querySelector('.tg-free-go').click(); }));
+      pre.addEventListener('change', () => { inp.value = pre.value; });
+      box.querySelector('.tg-free-go').addEventListener('click', () => {
+        freeMin = Math.max(5, Math.min(600, +inp.value || 45));
+        chrome.storage.local.set({ freeMin });
+        playFit(box, freeMin, `空き時間 ${freeMin}分`);
+      });
+      box.querySelector('.tg-free-bed').addEventListener('click', async () => {
+        const { min, from } = await minToBed();
+        if (min < 5) { box.querySelector('.tg-free-msg').textContent = `もう就寝時間（${from}〜）です。おやすみなさい🌙`; return; }
+        playFit(box, min, `就寝時間（${from}）まで ${hmText(min * 60)}`);
+      });
+    });
   }
 
   // 後で見るの一覧（段ごと）の動画
@@ -735,7 +938,7 @@ const TGFeed = (() => {
       rec.mode = 'end';
       return;
     }
-    const key = kind + '|' + q;
+    const key = kind + '|' + q + (S.zeroView ? '|zero' : '');
     const fav = favSetOf(S);
     if (!force && searches.has(key) && Date.now() - searches.get(key).at < TTL) {
       rec = searches.get(key); rec.fav = fav;
@@ -743,6 +946,7 @@ const TGFeed = (() => {
     }
     rec = newRec('search', fav);
     rec.q = q; rec.qKind = kind; rec.mode = 'more';
+    rec.zero = !!S.zeroView; // ゼロビュー：24時間以内・再生100回未満だけ（アップロード日順で探す）
     searches.set(key, rec);
     skeleton(0, 0);
     status(`検索中… ${q}`);
@@ -754,7 +958,7 @@ const TGFeed = (() => {
     const short = rec.qKind === 'short';
     try {
       while (pages++ < 5 && added < 24 && rec.mode !== 'end') {
-        const { items: list, token } = await YTAPI.search(rec.token ? null : rec.q + (short ? ' #shorts' : ''), rec.token, ctl.signal);
+        const { items: list, token } = await YTAPI.search(rec.token ? null : rec.q + (short ? ' #shorts' : ''), rec.token, ctl.signal, rec.zero ? 'EgQIARAB' : undefined);
         if (my !== run) return;
         rec.token = token;
         if (!token) rec.mode = 'end';
@@ -769,6 +973,7 @@ const TGFeed = (() => {
         for (const x of cand) {
           if (!x.chKey || seen.has(x.v)) continue;
           if (rec.fav.has(x.chKey) || (x.chId && rec.fav.has('channel/' + x.chId))) continue; // 登録済みは除外
+          if (rec.zero && (x.live || (x.n || 0) >= 100 || (x.p && Date.now() - x.p > 26 * 3600e3))) continue;
           seen.add(x.v);
           rec.items.push({ v: x.v, t: x.t, p: x.p, n: x.n, th: x.thumb, d: x.dur || 0, live: x.live, short, w: x.w || 0, ch: { key: x.chKey, name: x.chName, unsub: true } });
           added++;
@@ -781,7 +986,7 @@ const TGFeed = (() => {
       rec.mode = 'end';
     } finally { rec.loading = false; }
     if (my !== run) return;
-    const msg = `検索：${rec.q}　${rec.items.length} 件（登録していないチャンネルのみ）${rec.mode === 'end' ? '' : '・下へスクロールで続き'}`;
+    const msg = `${rec.zero ? '🔭 ゼロビュー（1時間以内に投稿・再生100回未満）' : '検索'}：${rec.q}　${rec.items.length} 件（登録していないチャンネルのみ）${rec.mode === 'end' ? '' : '・下へスクロールで続き'}`;
     if (first) paint(rec.items, msg);
     else { items = rec.items; status(msg); afterLoad(); }
     requestAnimationFrame(() => {
@@ -796,6 +1001,8 @@ const TGFeed = (() => {
   // ---------- おすすめの重複を避ける ----------
   //   表示したおすすめは recSeen に覚えておき、3日間は出さない（「更新」で同じ動画が並ばないように）。見終わった動画も出さない
   let recSeen = null, recSeenT = null;
+  // 「おすすめリセット」で記録が消されたら読み直す
+  chrome.storage.onChanged.addListener(ch => { if (ch.recSeen && !ch.recSeen.newValue) { recSeen = null; Object.values(recs).forEach(r => { r.blocked = new Set(); }); } });
   async function loadRecSeen() {
     if (recSeen) return recSeen;
     const { recSeen: o = {} } = await chrome.storage.local.get('recSeen');
@@ -866,6 +1073,7 @@ const TGFeed = (() => {
     rec.loading = true;
     try {
       if (!rec.plan) rec.plan = await recPlan(rec.S);
+      if (!first) status('YouTubeのおすすめを出し切ったので、よく見るフォルダのキーワードと関連動画から探しています…');
       const { P, histCh } = rec.plan;
       const perCh = rec.perCh || (rec.perCh = new Map());
       let added = 0, rounds = 0;
@@ -877,7 +1085,11 @@ const TGFeed = (() => {
         const searchJob = q => YTAPI.search(q, null, ctl.signal).then(r => r.items, () => []);
         if (q1) jobs.push(searchJob(q1));
         if (q2) jobs.push(searchJob(q2));
+        // 関連動画の元が尽きたら、これまで出したおすすめから補充（まだ元にしていないもの）
+        const used = rec.usedSeeds || (rec.usedSeeds = new Set());
+        if (!rec.plan.seeds.length) rec.plan.seeds = rec.items.map(x => x.v).filter(v => !used.has(v)).sort(() => Math.random() - 0.5).slice(0, 10);
         const seed = rec.plan.seeds.shift();
+        if (seed) used.add(seed);
         if (seed) jobs.push(YTAPI.related(seed, ctl.signal).catch(() => []));
         if (first && rounds === 1 || rec.token) jobs.push(YTAPI.recommended(first && rounds === 1 ? null : rec.token, ctl.signal).then(r => { rec.token = r.token; return r.items; }, () => []));
         if (!jobs.length) { rec.vmode = 'end'; break; }
@@ -922,7 +1134,7 @@ const TGFeed = (() => {
     markRecSeen(rec.items);
     if (first && !rec.painted) paint(rec.items, '');
     else { items = rec.items; status(recHasMore() ? '' : 'これ以上のおすすめは見つかりませんでした（「更新」で読み直せます）'); afterLoad(); }
-    if (first && !rec.items.length) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">おすすめが見つかりませんでした。「⚖ 比重」の設定を見直すか、しばらくしてから「更新」してください。</div>';
+    if (first && !rec.items.length) el.querySelector('.tg-grid').innerHTML = '<div class="tg-empty">おすすめが見つかりませんでした。しばらくしてから「更新」してください。</div>';
   }
 
   // おすすめ（動画）：YouTubeのホームのおすすめから、登録していないチャンネルの動画だけ（速さ優先）
@@ -948,7 +1160,14 @@ const TGFeed = (() => {
         rec.items.push(...fresh, ...old);
         added += fresh.length + old.length;
         showSoFar(my, first);
-        if (!r.token) { rec.vmode = 'end'; break; }
+        if (!r.token) break;
+      }
+      // YouTubeのおすすめを出し切った（続きが無い・2回続けて新しい動画が無い）ら、キーワード検索と関連動画で探す
+      rec.empty = added ? 0 : (rec.empty || 0) + 1;
+      if (!rec.token || rec.empty >= 2) {
+        rec.vmode = 'more'; rec.token = null;
+        TG.log('おすすめ', 'YouTubeのおすすめを出し切ったので、フォルダのキーワード・関連動画から探します');
+        if (!first) { rec.loading = false; return loadRecVideo(my, false); }
       }
       rec.at = Date.now();
     } catch (e) {
@@ -964,7 +1183,8 @@ const TGFeed = (() => {
   async function loadRec(my, first) {
     if (rec.kind === 'video') {
       if (first) { await loadRecSeen(); rec.blocked = new Set(recSeen.keys()); }
-      return loadRecHome(my, first); // （検索・関連動画を混ぜる loadRecVideo は、いったん使わない）
+      // まずホームのおすすめ。出し切ったらフォルダのキーワード検索・関連動画（loadRecVideo）
+      return rec.vmode === 'more' ? loadRecVideo(my, first) : loadRecHome(my, first);
     }
     rec.loading = true;
     let added = 0, tries = 0;
@@ -1226,5 +1446,5 @@ const TGFeed = (() => {
   }
   const type = () => curType;
 
-  return { setFocus, setQuery, TYPES, mount, refresh, signature, setCols, setWatched, setHideWatched, markWatched, setLater, playable, type };
+  return { chaosSort, setViewCap, setFocus, setQuery, TYPES, mount, refresh, signature, setCols, setWatched, setHideWatched, markWatched, setLater, playable, type };
 })();

@@ -1,5 +1,5 @@
 // Google Drive 同期（バックグラウンド）
-// 認証: chrome.identity.launchWebAuthFlow（利用者が作成したOAuthクライアントIDを使用）
+// 認証: chrome.identity.launchWebAuthFlow（組み込みのOAuthクライアントID。設定で別のIDにも変えられる）
 // 保存先: マイドライブ直下の TubeFolio-sync.json（drive.file 権限＝この拡張が作ったファイルだけ触れる）
 importScripts('shared.js');
 
@@ -7,9 +7,14 @@ const FILE = 'TubeFolio-sync.json';
 const OLD_FILE = TG.LEGACY_APP + '-sync.json'; // 名前を変える前のファイル（見つけたら TubeFolio-sync.json に名前を変える）
 const SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
+// 拡張機能に組み込むクライアントID（manifest の key で拡張機能のIDが固定なので、どのPCでも同じIDが使える）
+//   ここに入っていれば、新しいPCでもクライアントIDの入力は不要（「Google Drive に接続」を押すだけ）
+const BUILTIN_CLIENT_ID = '553603750505-7g02mobn8i1f8sjh3l713bvdvbktrtn5.apps.googleusercontent.com';
+
 async function getSync() {
   const { sync = {} } = await chrome.storage.local.get('sync');
-  return sync;
+  if (!sync.clientId && BUILTIN_CLIENT_ID) return { ...sync, clientId: BUILTIN_CLIENT_ID, builtin: true };
+  return { ...sync, builtin: !!BUILTIN_CLIENT_ID && sync.clientId === BUILTIN_CLIENT_ID };
 }
 async function setSync(patch) {
   const s = { ...(await getSync()), ...patch };
@@ -404,3 +409,47 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 });
 chrome.runtime.onInstalled.addListener(d => TG.log('拡張', d.reason === 'update' ? `更新しました（v${chrome.runtime.getManifest().version}）` : `インストール：${d.reason}`));
 chrome.runtime.onStartup.addListener(() => TG.log('拡張', 'ブラウザ起動'));
+
+// 字幕検索（v4.23）をやめたので、このPCに保存した字幕を消す
+chrome.runtime.onInstalled.addListener(async () => {
+  const all = await chrome.storage.local.get(null);
+  const keys = Object.keys(all).filter(k => k.startsWith('tr:') || k === 'trIdx' || k === 'trOpts');
+  if (keys.length) await chrome.storage.local.remove(keys);
+});
+
+// ---------- 一時的に YouTube の視聴履歴に残さない（histOff） ----------
+//   再生の記録を送る通信（/api/stats/watchtime・/api/stats/playback）を止める。TubeFolio の視聴記録も止める
+const HIST_RULES = [9101, 9102];
+async function applyHistOff() {
+  const { histOff } = await chrome.storage.local.get('histOff');
+  const on = !!histOff?.on && (!histOff.until || histOff.until > Date.now());
+  if (histOff?.on && !on) { await chrome.storage.local.set({ histOff: { on: false } }); TG.log('履歴オフ', '時間になったので履歴を元に戻しました'); }
+  const types = ['xmlhttprequest', 'ping', 'image', 'other'];
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: HIST_RULES,
+    addRules: on ? [
+      { id: HIST_RULES[0], priority: 1, action: { type: 'block' }, condition: { urlFilter: '||youtube.com/api/stats/watchtime', resourceTypes: types } },
+      { id: HIST_RULES[1], priority: 1, action: { type: 'block' }, condition: { urlFilter: '||youtube.com/api/stats/playback', resourceTypes: types } }
+    ] : []
+  });
+  chrome.alarms.clear('tg-histoff');
+  if (on && histOff.until) chrome.alarms.create('tg-histoff', { when: histOff.until + 1000 });
+}
+chrome.storage.onChanged.addListener(ch => { if (ch.histOff) applyHistOff().catch(() => {}); });
+chrome.alarms.onAlarm.addListener(a => { if (a.name === 'tg-histoff') applyHistOff().catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => applyHistOff().catch(() => {}));
+chrome.runtime.onInstalled.addListener(() => applyHistOff().catch(() => {}));
+
+// ---------- Return YouTube Dislike（推定の高評価・低評価）と、翻訳（他言語で検索） ----------
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  if (msg?.type === 'ryd') {
+    fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${encodeURIComponent(msg.v)}`)
+      .then(r => (r.ok ? r.json() : null)).then(j => reply(j ? { likes: j.likes || 0, dislikes: j.dislikes || 0, views: j.viewCount || 0 } : null)).catch(() => reply(null));
+    return true;
+  }
+  if (msg?.type === 'translate') {
+    const u = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(msg.to)}&dt=t&q=${encodeURIComponent(msg.q)}`;
+    fetch(u).then(r => (r.ok ? r.json() : null)).then(j => reply(j ? (j[0] || []).map(x => x[0]).join('') : null)).catch(() => reply(null));
+    return true;
+  }
+});

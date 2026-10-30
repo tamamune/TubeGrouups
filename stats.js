@@ -154,9 +154,16 @@
   function renderVideos(hist, keep = 0) {
     const q = $('#q').value.trim().toLowerCase();
     const sort = $('#sort').value;
+    const pctOf = h => (h.d ? Math.min(100, (h.sec / h.d) * 100) : 0);
+    const fp = +$('#fPct').value, fv = +$('#fViews').value, [l0, l1] = ($('#fLen').value || '-').split('-');
     rows = hist.filter(h => !q || (h.t || '').toLowerCase().includes(q) || (h.ch || '').toLowerCase().includes(q));
+    // 絞り込み：見た割合・再生数・長さ（長さの分からない動画は長さの絞り込みで除く）
+    if (fp > 0) rows = rows.filter(h => h.d && pctOf(h) >= fp); else if (fp < 0) rows = rows.filter(h => h.d && pctOf(h) < -fp);
+    if (fv > 0) rows = rows.filter(h => (h.views || 0) >= fv); else if (fv < 0) rows = rows.filter(h => h.views && h.views < -fv);
+    if (l0 || l1) rows = rows.filter(h => h.d && h.d >= (+l0 || 0) && (!l1 || h.d < +l1));
+    $('#fReset').hidden = !(fp || fv || l0 || l1);
     if (sort === 'rate') rows = rows.filter(h => h.rate);
-    const by = { last: h => h.last || 0, sec: h => h.sec || 0, views: h => h.views || 0, likes: h => h.likes || 0, rate: h => h.last || 0 }[sort];
+    const by = { last: h => h.last || 0, sec: h => h.sec || 0, views: h => h.views || 0, likes: h => h.likes || 0, rate: h => h.last || 0, pct: pctOf, dur: h => h.d || 0 }[sort];
     rows.sort((a, b) => by(b) - by(a));
     shown = 0;
     $('#videos tbody').innerHTML = '';
@@ -224,6 +231,8 @@
   });
   $('#q').addEventListener('input', () => render());
   $('#sort').addEventListener('change', () => render());
+  ['#fPct', '#fViews', '#fLen'].forEach(s => $(s).addEventListener('change', () => render()));
+  $('#fReset').addEventListener('click', () => { $('#fPct').value = '0'; $('#fViews').value = '0'; $('#fLen').value = ''; render(); });
   $('#more').addEventListener('click', more);
   $('#ryd').addEventListener('change', async e => {
     D.ryd = e.target.checked;
@@ -241,7 +250,7 @@
   });
   $('#clear').addEventListener('click', async () => {
     if (!confirm('視聴記録（視聴時間・見た動画の一覧）をすべて消去しますか？\n（視聴済みの表示やフォルダ設定は消えません）')) return;
-    await chrome.storage.local.remove(['history', 'daily', 'ytHistSeen', 'lastHistImport']);
+    await chrome.storage.local.remove(['history', 'daily', 'ytHistSeen', 'lastHistImport', 'dayCh', 'dayHr', 'dayYt']);
     loadAll();
   });
   // 別のタブで再生中は記録が数秒ごとに増えるので、まとめて15秒ごとに更新（表示中の行数とスクロール位置は保つ）
